@@ -465,4 +465,146 @@ export const hrmsService = {
   getBgvRecord(empId: string) {
     return apiClient.get<ApiEnvelope<unknown>>(endpoints.hrReports.bgvByEmployee(empId));
   },
+
+  // Learning & Development
+  createTraining(payload: Record<string, unknown>) {
+    return apiClient.post<ApiEnvelope<unknown>>(endpoints.learning.trainings, {
+      contentType: "application/json",
+      body: JSON.stringify(payload),
+    });
+  },
+
+  updateTraining(trainingId: string, payload: Record<string, unknown>) {
+    return apiClient.put<ApiEnvelope<unknown>>(endpoints.learning.trainingById(trainingId), {
+      contentType: "application/json",
+      body: JSON.stringify(payload),
+    });
+  },
+
+  getTrainings() {
+    return apiClient.get<ApiEnvelope<unknown[]>>(endpoints.learning.trainings);
+  },
+
+  getTrainingById(trainingId: string) {
+    return apiClient.get<ApiEnvelope<unknown>>(endpoints.learning.trainingById(trainingId));
+  },
+
+  assignTrainers(trainingId: string, trainerUserIds: number[]) {
+    return apiClient.post<ApiEnvelope<unknown>>(endpoints.learning.trainers(trainingId), {
+      contentType: "application/json",
+      body: JSON.stringify({ trainer_user_ids: trainerUserIds }),
+    });
+  },
+
+  getTrainingTrainers(trainingId: string) {
+    return apiClient.get<ApiEnvelope<unknown[]>>(endpoints.learning.trainers(trainingId));
+  },
+
+  removeTrainer(trainingId: string, trainerUserId: string) {
+    return apiClient.delete<ApiEnvelope<unknown>>(endpoints.learning.trainerById(trainingId, trainerUserId));
+  },
+
+  createTrainingSession(trainingId: string, payload: Record<string, unknown>) {
+    return apiClient.post<ApiEnvelope<unknown>>(endpoints.learning.sessions(trainingId), {
+      contentType: "application/json",
+      body: JSON.stringify(payload),
+    });
+  },
+
+  getTrainingSessions(trainingId: string) {
+    return apiClient.get<ApiEnvelope<unknown[]>>(endpoints.learning.sessions(trainingId));
+  },
+
+  addTrainingParticipants(trainingId: string, payload: Record<string, unknown>) {
+    return apiClient.post<ApiEnvelope<unknown[]>>(endpoints.learning.participants(trainingId), {
+      contentType: "application/json",
+      body: JSON.stringify(payload),
+    });
+  },
+
+  getTrainingParticipants(trainingId: string) {
+    return apiClient.get<ApiEnvelope<unknown[]>>(endpoints.learning.participants(trainingId));
+  },
+
+  removeTrainingParticipant(trainingId: string, userId: string) {
+    return apiClient.delete<ApiEnvelope<unknown>>(endpoints.learning.participantByUserId(trainingId, userId));
+  },
+
+  updateTrainingParticipantStatus(trainingId: string, userId: string, enrollmentStatus: "WITHDRAWN" | "COMPLETED") {
+    return apiClient.patch<ApiEnvelope<unknown>>(endpoints.learning.participantByUserId(trainingId, userId), {
+      contentType: "application/json",
+      body: JSON.stringify({ enrollment_status: enrollmentStatus }),
+    });
+  },
+
+  selfEnrollTraining(trainingId: string) {
+    return apiClient.post<ApiEnvelope<unknown>>(endpoints.learning.enroll(trainingId));
+  },
+
+  getOpenTrainings() {
+    return apiClient.get<ApiEnvelope<unknown[]>>(endpoints.learning.open);
+  },
+
+  uploadTrainingMaterial(trainingId: string, payload: {
+    title: string;
+    visibility?: "HR_ONLY" | "EMPLOYEE";
+    materialFile: File;
+  }) {
+    const fd = new FormData();
+    fd.append("title", payload.title);
+    fd.append("visibility", payload.visibility ?? "EMPLOYEE");
+    fd.append("material_file", payload.materialFile);
+    return apiClient.post<ApiEnvelope<unknown>>(endpoints.learning.materials(trainingId), { body: fd });
+  },
+
+  getTrainingMaterials(trainingId: string) {
+    return apiClient.get<ApiEnvelope<unknown[]>>(endpoints.learning.materials(trainingId));
+  },
+
+  markAttendance(trainingId: string, sessionId: string, payload: {
+    user_id: number;
+    attendance_status: "PRESENT" | "ABSENT";
+  }) {
+    return apiClient.post<ApiEnvelope<unknown>>(endpoints.learning.attendance(trainingId, sessionId), {
+      contentType: "application/json",
+      body: JSON.stringify(payload),
+    });
+  },
+
+  getAttendance(trainingId: string, sessionId: string) {
+    return apiClient.get<ApiEnvelope<unknown[]>>(endpoints.learning.attendance(trainingId, sessionId));
+  },
+
+  uploadAssessment(trainingId: string, payload: {
+    name: string;
+    description?: string;
+    weight_percent: number;
+    assessmentFile: File;
+  }) {
+    const fd = new FormData();
+    fd.append("name", payload.name);
+    fd.append("description", payload.description ?? "");
+    fd.append("weight_percent", String(payload.weight_percent));
+    fd.append("assessment_file", payload.assessmentFile);
+    return apiClient.post<ApiEnvelope<unknown>>(endpoints.learning.assessments(trainingId), { body: fd });
+  },
+
+  getAssessments(trainingId: string) {
+    return apiClient.get<ApiEnvelope<unknown[]>>(endpoints.learning.assessments(trainingId));
+  },
+
+  submitTrainingScores(trainingId: string, payload: {
+    user_id: number;
+    scores_json: Record<string, number>;
+    mark_completed?: boolean;
+  }) {
+    return apiClient.post<ApiEnvelope<unknown>>(endpoints.learning.scores(trainingId), {
+      contentType: "application/json",
+      body: JSON.stringify(payload),
+    });
+  },
+
+  getTrainingAnalytics(trainingId: string) {
+    return apiClient.get<ApiEnvelope<unknown>>(endpoints.learning.analytics(trainingId));
+  },
 };

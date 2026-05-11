@@ -402,6 +402,64 @@ function DashboardPageContent() {
     is_manager: false,
   });
   const [editingAllocationId, setEditingAllocationId] = useState<string>("");
+  const [learningTrainings, setLearningTrainings] = useState<Array<Record<string, unknown>>>([]);
+  /** Same rows as `learningTrainings` but updated synchronously after each fetch (avoids stale closure in roster load). */
+  const learningTrainingsLatestRef = useRef<Array<Record<string, unknown>>>([]);
+  const [learningOpenTrainings, setLearningOpenTrainings] = useState<Array<Record<string, unknown>>>([]);
+  const [learningSessions, setLearningSessions] = useState<Array<Record<string, unknown>>>([]);
+  const [learningMaterials, setLearningMaterials] = useState<Array<Record<string, unknown>>>([]);
+  const [learningAssessments, setLearningAssessments] = useState<Array<Record<string, unknown>>>([]);
+  const [learningAttendanceRows, setLearningAttendanceRows] = useState<Array<Record<string, unknown>>>([]);
+  const [learningScores, setLearningScores] = useState<Array<Record<string, unknown>>>([]);
+  const [learningAnalytics, setLearningAnalytics] = useState<Record<string, unknown> | null>(null);
+  const [selectedLearningTrainingId, setSelectedLearningTrainingId] = useState("");
+  const [selectedLearningSessionId, setSelectedLearningSessionId] = useState("");
+  const [learningTrainingForm, setLearningTrainingForm] = useState({
+    name: "",
+    category: "TECHNICAL",
+    type: "OPTIONAL",
+    description: "",
+    duration_days: "1",
+    status: "DRAFT",
+  });
+  /** Set when creating a training; assigned via API right after create. */
+  const [learningCreateTrainerId, setLearningCreateTrainerId] = useState("");
+  const [learningTrainerOptions, setLearningTrainerOptions] = useState<Array<{ id: string; label: string }>>([]);
+  const [selectedLearningTrainerId, setSelectedLearningTrainerId] = useState("");
+  const [selectedLearningParticipantId, setSelectedLearningParticipantId] = useState("");
+  const [selectedLearningApiParticipantId, setSelectedLearningApiParticipantId] = useState("");
+  const [learningRosterTrainerRows, setLearningRosterTrainerRows] = useState<Array<Record<string, unknown>>>([]);
+  const [learningRosterParticipantRows, setLearningRosterParticipantRows] = useState<
+    Array<Record<string, unknown>>
+  >([]);
+  const [learningSessionForm, setLearningSessionForm] = useState({
+    session_date: "",
+    start_time: "",
+    end_time: "",
+    mode: "ONLINE",
+    venue: "",
+    meeting_link: "",
+  });
+  const [learningMaterialForm, setLearningMaterialForm] = useState({
+    title: "",
+    visibility: "EMPLOYEE",
+  });
+  const [learningMaterialFile, setLearningMaterialFile] = useState<File | null>(null);
+  const [learningAssessmentForm, setLearningAssessmentForm] = useState({
+    name: "",
+    description: "",
+    weight_percent: "10",
+  });
+  const [learningAssessmentFile, setLearningAssessmentFile] = useState<File | null>(null);
+  const [learningAttendanceForm, setLearningAttendanceForm] = useState({
+    user_id: "",
+    attendance_status: "PRESENT",
+  });
+  const [learningScoreForm, setLearningScoreForm] = useState({
+    user_id: "",
+    score_percent: "0",
+    mark_completed: true,
+  });
   const userRoles = user?.roles ?? [];
   const hasHrAccess = userRoles.includes("ROLE_HR") || userRoles.includes("ROLE_ADMIN");
   const hasManagerAccess = userRoles.includes("ROLE_MANAGER");
@@ -446,6 +504,99 @@ function DashboardPageContent() {
     },
     [hasManagerAccess, managerProjects, managerPortfolioRows]
   );
+
+  /** Participants for this training (GET participants + optional name match from onboard list). */
+  const learningParticipantOptionsForAttendanceScores = useMemo(() => {
+    const out: Array<{ id: string; label: string }> = [];
+    const seen = new Set<string>();
+    const labelFromOnboard = (uid: string): string | null => {
+      const u = uid.trim();
+      if (!u) return null;
+      const exact = learningTrainerOptions.find((o) => o.id === u);
+      if (exact) return exact.label;
+      const n = Number(u);
+      if (Number.isFinite(n) && n > 0) {
+        const byNum = learningTrainerOptions.find(
+          (o) => !String(o.id).startsWith("email:") && Number(String(o.id)) === n
+        );
+        if (byNum) return byNum.label;
+      }
+      return null;
+    };
+    for (const row of learningRosterParticipantRows) {
+      const uid = participantRowUserId(row);
+      if (!uid || seen.has(uid)) continue;
+      if (uid.startsWith("email:")) {
+        seen.add(uid);
+        let name = String(
+          row.name ?? row.employee_name ?? row.employeeName ?? row.user_name ?? row.userName ?? ""
+        ).trim();
+        let email = String(
+          row.email ?? row.user_email ?? row.userEmail ?? row.employee_email ?? row.employeeEmail ?? ""
+        ).trim();
+        const nested =
+          (row.user as Record<string, unknown> | undefined) ??
+          (row.employee as Record<string, unknown> | undefined);
+        if (nested && typeof nested === "object") {
+          if (!name) name = String(nested.name ?? nested.full_name ?? nested.fullName ?? "").trim();
+          if (!email) email = String(nested.email ?? nested.user_email ?? nested.userEmail ?? "").trim();
+        }
+        const onboard = labelFromOnboard(uid);
+        const status = String(row.enrollment_status ?? row.enrollmentStatus ?? "").trim();
+        const source = String(row.participant_source ?? row.participantSource ?? "").trim();
+        const emailFromOnboard = onboard?.match(/\(([^)]+)\)/)?.[1]?.trim() ?? "";
+        const emailBracket = email || emailFromOnboard;
+        const label = [
+          name || onboard?.split("(")[0]?.trim() || uid.replace(/^email:/, ""),
+          emailBracket ? `(${emailBracket})` : "",
+          status ? `[${status}]` : "",
+          source ? `[${source}]` : "",
+        ]
+          .filter(Boolean)
+          .join(" ");
+        out.push({ id: uid, label: label || onboard || uid });
+        continue;
+      }
+      const n = Number(uid);
+      if (!Number.isFinite(n) || n <= 0) continue;
+      seen.add(uid);
+      let name = String(
+        row.name ?? row.employee_name ?? row.employeeName ?? row.user_name ?? row.userName ?? ""
+      ).trim();
+      let email = String(
+        row.email ?? row.user_email ?? row.userEmail ?? row.employee_email ?? row.employeeEmail ?? ""
+      ).trim();
+      const nested =
+        (row.user as Record<string, unknown> | undefined) ??
+        (row.employee as Record<string, unknown> | undefined);
+      if (nested && typeof nested === "object") {
+        if (!name) name = String(nested.name ?? nested.full_name ?? nested.fullName ?? "").trim();
+        if (!email) email = String(nested.email ?? nested.user_email ?? nested.userEmail ?? "").trim();
+      }
+      const onboard = labelFromOnboard(uid);
+      const nameFromOnboard = onboard
+        ? onboard.includes("(")
+          ? onboard.slice(0, onboard.indexOf("(")).trim()
+          : onboard
+        : "";
+      const emailFromOnboard =
+        onboard?.match(/\(([^)]+)\)/)?.[1]?.trim() ?? "";
+      const displayName = name || nameFromOnboard || `User ${uid}`;
+      const displayEmail = email || emailFromOnboard;
+      const status = String(row.enrollment_status ?? row.enrollmentStatus ?? "").trim();
+      const source = String(row.participant_source ?? row.participantSource ?? "").trim();
+      const label = [
+        displayName,
+        displayEmail ? `(${displayEmail})` : "",
+        status ? `[${status}]` : "",
+        source ? `[${source}]` : "",
+      ]
+        .filter(Boolean)
+        .join(" ");
+      out.push({ id: uid, label: label || onboard || `User ${uid}` });
+    }
+    return out;
+  }, [learningRosterParticipantRows, learningTrainerOptions]);
 
   const priorEmploymentDocsRequired = useMemo(() => {
     const raw = String(selfOnboardForm.yoe ?? "").trim().replace(",", ".");
@@ -865,6 +1016,295 @@ function DashboardPageContent() {
     return () => window.clearTimeout(id);
   }, [activeTab, hasManagerAccess, selectedManagerProjectCode]);
 
+  async function loadLearningTrainingsSafe() {
+    const [trainingsRes, openRes, onboardRes, allocRes] = await Promise.allSettled([
+      hrmsService.getTrainings(),
+      hrmsService.getOpenTrainings(),
+      hrmsService.getOnboardList({ page: "0", size: "500" }),
+      hasHrAccess
+        ? hrmsService.getAllocations({ page: "0", size: "500", view: "ALL" })
+        : Promise.resolve({ data: [] }),
+    ]);
+    const trainings =
+      trainingsRes.status === "fulfilled"
+        ? toPagedRows((trainingsRes.value as { data?: unknown }).data ?? trainingsRes.value)
+        : [];
+    learningTrainingsLatestRef.current = trainings;
+    const openTrainings =
+      openRes.status === "fulfilled"
+        ? toPagedRows((openRes.value as { data?: unknown }).data ?? openRes.value)
+        : [];
+    setLearningTrainings(trainings);
+    setLearningOpenTrainings(openTrainings);
+    const onboardRows =
+      onboardRes.status === "fulfilled"
+        ? toPagedRows((onboardRes.value as { data?: unknown }).data ?? onboardRes.value)
+        : [];
+    const allocationRows =
+      allocRes.status === "fulfilled"
+        ? toPagedRows((allocRes.value as { data?: unknown }).data ?? allocRes.value)
+        : [];
+    const mergedOnboardRows = [...onboardRows, ...onboardedUsers, ...allocationRows];
+    const trainerOptions = Array.from(
+      new Map(
+        mergedOnboardRows
+          .map((row) => {
+            const rawId = String(
+              row.user_id ??
+                row.userId ??
+                row.emp_id ??
+                row.empId ??
+                row.id ??
+                (row.user as Record<string, unknown> | undefined)?.id ??
+                ""
+            ).trim();
+            const name = String(row.name ?? "Employee").trim();
+            const email = String(
+              row.email ??
+                row.user_email ??
+                row.userEmail ??
+                row.employee_email ??
+                row.employeeEmail ??
+                ""
+            ).trim();
+            const userId = rawId || (email ? `email:${email.toLowerCase()}` : "");
+            if (!userId) return null;
+            const label = email ? `${name} (${email})` : name;
+            return [userId, { id: userId, label }] as const;
+          })
+          .filter((item): item is readonly [string, { id: string; label: string }] => Boolean(item))
+      ).values()
+    );
+    setLearningTrainerOptions(trainerOptions);
+    if (!selectedLearningTrainerId && trainerOptions.length) {
+      setSelectedLearningTrainerId(trainerOptions[0].id);
+    }
+    // Keep training selector empty by default; user explicitly chooses.
+  }
+
+  async function loadLearningDetailSafe(trainingId: string, sessionId?: string) {
+    if (!trainingId) return;
+    const [sessionsRes, materialsRes, assessmentsRes, analyticsRes] = await Promise.allSettled([
+      hrmsService.getTrainingSessions(trainingId),
+      hrmsService.getTrainingMaterials(trainingId),
+      hrmsService.getAssessments(trainingId),
+      hrmsService.getTrainingAnalytics(trainingId),
+    ]);
+    setLearningSessions(
+      sessionsRes.status === "fulfilled"
+        ? toPagedRows((sessionsRes.value as { data?: unknown }).data ?? sessionsRes.value)
+        : []
+    );
+    setLearningMaterials(
+      materialsRes.status === "fulfilled"
+        ? toPagedRows((materialsRes.value as { data?: unknown }).data ?? materialsRes.value)
+        : []
+    );
+    setLearningAssessments(
+      assessmentsRes.status === "fulfilled"
+        ? toPagedRows((assessmentsRes.value as { data?: unknown }).data ?? assessmentsRes.value)
+        : []
+    );
+    setLearningAnalytics(
+      analyticsRes.status === "fulfilled"
+        ? (((analyticsRes.value as { data?: unknown }).data ?? analyticsRes.value) as Record<string, unknown>)
+        : null
+    );
+    const resolvedSessionId = sessionId || selectedLearningSessionId;
+    if (resolvedSessionId) {
+      try {
+        const attendanceRes = await hrmsService.getAttendance(trainingId, resolvedSessionId);
+        setLearningAttendanceRows(toPagedRows(attendanceRes.data ?? attendanceRes));
+      } catch {
+        setLearningAttendanceRows([]);
+      }
+    }
+  }
+
+  async function resolveLearningTrainerUserId(selectedValue: string): Promise<number> {
+    let idNum = Number(selectedValue);
+    if ((!Number.isFinite(idNum) || idNum <= 0) && selectedValue.startsWith("email:")) {
+      const email = selectedValue.slice("email:".length).trim();
+      if (email) {
+        const userRes = await hrmsService.getUser({ email });
+        const payload = ((userRes as { data?: unknown }).data ?? userRes) as
+          | Record<string, unknown>
+          | null;
+        const nestedUser = (payload?.user as Record<string, unknown> | undefined) ?? null;
+        const candidate = Number(
+          payload?.id ??
+            payload?.user_id ??
+            payload?.userId ??
+            payload?.emp_id ??
+            payload?.empId ??
+            nestedUser?.id ??
+            nestedUser?.user_id ??
+            nestedUser?.userId ??
+            nestedUser?.emp_id ??
+            nestedUser?.empId ??
+            0
+        );
+        if (Number.isFinite(candidate) && candidate > 0) {
+          idNum = candidate;
+        }
+      }
+    }
+    if (!Number.isFinite(idNum) || idNum <= 0) {
+      throw new Error("Please select a valid trainer.");
+    }
+    return idNum;
+  }
+
+  async function loadLearningRosterLists(trainingId: string) {
+    const tid = trainingId.trim();
+    if (!tid) {
+      setLearningRosterTrainerRows([]);
+      setLearningRosterParticipantRows([]);
+      return;
+    }
+    const [tRes, pRes] = await Promise.allSettled([
+      hrmsService.getTrainingTrainers(tid),
+      hrmsService.getTrainingParticipants(tid),
+    ]);
+    setLearningRosterTrainerRows(
+      tRes.status === "fulfilled"
+        ? toPagedRows((tRes.value as { data?: unknown }).data ?? tRes.value)
+        : []
+    );
+    let participantRows =
+      pRes.status === "fulfilled" ? participantListFromApiEnvelope(pRes.value) : [];
+    if (pRes.status === "rejected") {
+      const err = pRes.reason;
+      const message =
+        err instanceof ApiError
+          ? `Participants could not be loaded (${err.status ?? "error"}: ${err.message}).`
+          : "Participants could not be loaded.";
+      setToast({ type: "error", message });
+    }
+    if (!participantRows.length) {
+      try {
+        const detail = await hrmsService.getTrainingById(tid);
+        participantRows = participantListFromApiEnvelope(detail);
+        if (!participantRows.length) {
+          const root = ((detail as { data?: unknown }).data ?? detail) as Record<string, unknown> | null;
+          participantRows = participantListFromTrainingRecord(root);
+        }
+      } catch {
+        /* ignore */
+      }
+    }
+    if (!participantRows.length) {
+      const list =
+        learningTrainingsLatestRef.current.length > 0 ? learningTrainingsLatestRef.current : learningTrainings;
+      const cached = list.find((r) => String(r.id ?? "").trim() === tid);
+      if (cached) participantRows = participantListFromTrainingRecord(cached as Record<string, unknown>);
+    }
+    const normalized = normalizeParticipantRows(participantRows).map((row) => ({
+      ...row,
+      participant_source: String(row.participant_source ?? row.participantSource ?? "").trim(),
+      enrollment_status:
+        row.enrollment_status == null
+          ? null
+          : String(row.enrollment_status ?? row.enrollmentStatus ?? "").trim() || null,
+    }));
+    setLearningRosterParticipantRows(normalized);
+  }
+
+  async function loadLearningParticipantsOnly(trainingId: string) {
+    const tid = trainingId.trim();
+    if (!tid) {
+      setLearningRosterParticipantRows([]);
+      return;
+    }
+    const res = await hrmsService.getTrainingParticipants(tid);
+    const participantRows = participantListFromApiEnvelope(res);
+    const normalized = normalizeParticipantRows(participantRows).map((row) => ({
+      ...row,
+      participant_source: String(row.participant_source ?? row.participantSource ?? "").trim(),
+      enrollment_status:
+        row.enrollment_status == null
+          ? null
+          : String(row.enrollment_status ?? row.enrollmentStatus ?? "").trim() || null,
+    }));
+    setLearningRosterParticipantRows(normalized);
+    if (!selectedLearningApiParticipantId && normalized.length) {
+      setSelectedLearningApiParticipantId(participantRowUserId(normalized[0] ?? {}));
+    }
+  }
+
+  useEffect(() => {
+    if (activeTab !== "learning") return;
+    const id = window.setTimeout(() => {
+      void (async () => {
+        try {
+          await loadLearningTrainingsSafe();
+        } catch {
+          setLearningTrainings([]);
+          setLearningOpenTrainings([]);
+        }
+      })();
+    }, 0);
+    return () => window.clearTimeout(id);
+  }, [activeTab, selectedLearningTrainingId, onboardedUsers]);
+
+  useEffect(() => {
+    if (activeTab !== "learning") return;
+    const trainingId = selectedLearningTrainingId.trim();
+    if (!trainingId) {
+      setLearningSessions([]);
+      setLearningMaterials([]);
+      setLearningAssessments([]);
+      setLearningAnalytics(null);
+      setLearningRosterTrainerRows([]);
+      setLearningRosterParticipantRows([]);
+      setSelectedLearningApiParticipantId("");
+      return;
+    }
+    const id = window.setTimeout(() => {
+      void (async () => {
+        try {
+          await loadLearningTrainingsSafe();
+        } catch {
+          setLearningTrainings([]);
+          setLearningOpenTrainings([]);
+        }
+        try {
+          await loadLearningDetailSafe(trainingId);
+        } catch {
+          setLearningSessions([]);
+          setLearningMaterials([]);
+          setLearningAssessments([]);
+          setLearningAnalytics(null);
+        }
+        try {
+          await loadLearningRosterLists(trainingId);
+        } catch {
+          setLearningRosterTrainerRows([]);
+          setLearningRosterParticipantRows([]);
+        }
+      })();
+    }, 0);
+    return () => window.clearTimeout(id);
+  }, [activeTab, selectedLearningTrainingId, selectedLearningSessionId]);
+
+  useEffect(() => {
+    if (!learningSessions.length) {
+      setSelectedLearningSessionId("");
+      return;
+    }
+    const exists = learningSessions.some(
+      (row) => String(row.id ?? "").trim() === selectedLearningSessionId.trim()
+    );
+    if (!exists) {
+      setSelectedLearningSessionId(String(learningSessions[0]?.id ?? "").trim());
+    }
+  }, [learningSessions, selectedLearningSessionId]);
+
+  useEffect(() => {
+    setLearningAttendanceForm((p) => ({ ...p, user_id: "" }));
+    setLearningScoreForm((p) => ({ ...p, user_id: "" }));
+  }, [selectedLearningTrainingId]);
+
   useEffect(() => {
     if (activeTab !== "leave") return;
     const id = window.setTimeout(() => {
@@ -972,6 +1412,211 @@ function DashboardPageContent() {
       if (contentRows.length) return contentRows;
     }
     return [];
+  }
+
+  /** Last-resort: find first array of plain objects nested in arbitrary API shapes. */
+  function extractFirstObjectArray(input: unknown, depth = 0): Array<Record<string, unknown>> {
+    if (depth > 8) return [];
+    if (Array.isArray(input)) {
+      if (
+        input.length &&
+        input.every((x) => x !== null && typeof x === "object" && !Array.isArray(x))
+      ) {
+        return input as Array<Record<string, unknown>>;
+      }
+      for (const item of input) {
+        const inner = extractFirstObjectArray(item, depth + 1);
+        if (inner.length) return inner;
+      }
+      return [];
+    }
+    if (input !== null && typeof input === "object") {
+      for (const v of Object.values(input as Record<string, unknown>)) {
+        const inner = extractFirstObjectArray(v, depth + 1);
+        if (inner.length) return inner;
+      }
+    }
+    return [];
+  }
+
+  function rowLooksLikeTrainingParticipant(row: Record<string, unknown>): boolean {
+    if (
+      row.session_date != null ||
+      row.sessionDate != null ||
+      row.start_time != null ||
+      row.startTime != null
+    ) {
+      return false;
+    }
+    return (
+      row.user_id != null ||
+      row.userId != null ||
+      row.participant_user_id != null ||
+      row.participantUserId != null ||
+      row.enrollment_status != null ||
+      row.enrollmentStatus != null ||
+      row.participant != null ||
+      row.trainingParticipant != null ||
+      row.email != null ||
+      row.user_email != null ||
+      row.userEmail != null ||
+      Boolean(row.user && typeof row.user === "object") ||
+      Boolean(row.employee && typeof row.employee === "object")
+    );
+  }
+
+  /** Unwrap GET /trainings/:id/participants payloads that may nest arrays under custom keys. */
+  function participantListFromApiEnvelope(res: unknown): Array<Record<string, unknown>> {
+    const rows = toPagedRows((res as { data?: unknown })?.data ?? res);
+    if (rows.length) return rows;
+    let payload: unknown = (res as { data?: unknown })?.data ?? res;
+    if (typeof payload === "string") {
+      try {
+        payload = JSON.parse(payload) as unknown;
+        const fromString = participantListFromApiEnvelope({ data: payload });
+        if (fromString.length) return fromString;
+      } catch {
+        return [];
+      }
+    }
+    if (payload !== null && typeof payload === "object" && !Array.isArray(payload)) {
+      const o = payload as Record<string, unknown>;
+      for (const key of [
+        "participants",
+        "training_participants",
+        "trainingParticipants",
+        "participantList",
+        "participant_list",
+        "records",
+        "elements",
+        "values",
+        "enrolled_users",
+        "enrolledUsers",
+        "result",
+        "body",
+      ] as const) {
+        const arr = o[key];
+        if (Array.isArray(arr) && arr.length) return arr as Array<Record<string, unknown>>;
+      }
+      const embedded = o._embedded;
+      if (embedded && typeof embedded === "object" && !Array.isArray(embedded)) {
+        for (const v of Object.values(embedded as Record<string, unknown>)) {
+          if (Array.isArray(v) && v.length && v.every((x) => x && typeof x === "object" && !Array.isArray(x))) {
+            return v as Array<Record<string, unknown>>;
+          }
+        }
+      }
+      const extracted = extractFirstObjectArray(payload);
+      if (extracted.length && extracted.some(rowLooksLikeTrainingParticipant)) return extracted;
+    }
+    if (Array.isArray(res)) return res as Array<Record<string, unknown>>;
+    return [];
+  }
+
+  function normalizeParticipantRows(rows: Array<Record<string, unknown>>): Array<Record<string, unknown>> {
+    return rows.map((r) => {
+      const inner =
+        (r.participant as Record<string, unknown> | undefined) ??
+        (r.participantDto as Record<string, unknown> | undefined) ??
+        (r.participant_dto as Record<string, unknown> | undefined) ??
+        (r.trainingParticipant as Record<string, unknown> | undefined) ??
+        (r.training_participant as Record<string, unknown> | undefined);
+      if (inner && typeof inner === "object") {
+        const hasUserRef =
+          inner.user_id != null ||
+          inner.userId != null ||
+          inner.participant_user_id != null ||
+          inner.employee_id != null ||
+          inner.employeeId != null ||
+          inner.emp_id != null ||
+          inner.empId != null ||
+          inner.id != null;
+        if (hasUserRef) return { ...r, ...inner };
+      }
+      return r;
+    });
+  }
+
+  function participantListFromTrainingRecord(
+    training: Record<string, unknown> | null
+  ): Array<Record<string, unknown>> {
+    if (!training) return [];
+    const candidates: Array<Record<string, unknown>> = [training];
+    for (const wrap of ["training", "payload", "result", "body", "record", "data"] as const) {
+      const inner = training[wrap];
+      if (inner && typeof inner === "object" && !Array.isArray(inner)) {
+        candidates.push(inner as Record<string, unknown>);
+      }
+    }
+    for (const c of candidates) {
+      for (const key of [
+        "participants",
+        "training_participants",
+        "trainingParticipants",
+        "participantList",
+        "participant_list",
+        "enrolled_users",
+        "enrolledUsers",
+        "employee_list",
+        "employeeList",
+        "roster",
+        "attendees",
+      ] as const) {
+        const v = c[key];
+        if (Array.isArray(v) && v.length) return v as Array<Record<string, unknown>>;
+      }
+    }
+    return [];
+  }
+
+  function participantRowUserId(row: Record<string, unknown>): string {
+    const nested =
+      (row.user as Record<string, unknown> | undefined) ??
+      (row.employee as Record<string, unknown> | undefined) ??
+      (row.participant_user as Record<string, unknown> | undefined) ??
+      (row.participantUser as Record<string, unknown> | undefined) ??
+      (row.user_info as Record<string, unknown> | undefined);
+    if (nested && typeof nested === "object") {
+      const nid = String(
+        nested.user_id ?? nested.userId ?? nested.id ?? nested.emp_id ?? nested.empId ?? ""
+      ).trim();
+      const n = Number(nid);
+      if (nid && Number.isFinite(n) && n > 0) return nid;
+    }
+    const direct = String(
+      row.user_id ??
+        row.userId ??
+        row.participant_user_id ??
+        row.participantUserId ??
+        row.member_user_id ??
+        row.memberUserId ??
+        row.employee_id ??
+        row.employeeId ??
+        row.emp_id ??
+        row.empId ??
+        ""
+    ).trim();
+    const d = Number(direct);
+    if (direct && Number.isFinite(d) && d > 0) return direct;
+    const emailRaw = String(
+      row.email ??
+        row.user_email ??
+        row.userEmail ??
+        row.employee_email ??
+        row.employeeEmail ??
+        (nested && typeof nested === "object"
+          ? String(
+              (nested as Record<string, unknown>).email ??
+                (nested as Record<string, unknown>).user_email ??
+                (nested as Record<string, unknown>).userEmail ??
+                ""
+            )
+          : "")
+    )
+      .trim()
+      .toLowerCase();
+    if (emailRaw) return `email:${emailRaw}`;
+    return "";
   }
 
   function buildUserIdToNameMap(users: Array<Record<string, unknown>>) {
@@ -1389,6 +2034,7 @@ function DashboardPageContent() {
       { id: "timelog", label: "Timelog", roles: ["ROLE_EMPLOYEE", "ROLE_MANAGER", "ROLE_HR", "ROLE_ADMIN"] },
       { id: "team-timelog", label: "Team Timelogs", roles: ["ROLE_MANAGER", "ROLE_HR", "ROLE_ADMIN"] },
       { id: "leave", label: "Leave Requests", roles: ["ROLE_EMPLOYEE", "ROLE_MANAGER", "ROLE_HR", "ROLE_ADMIN"] },
+      { id: "learning", label: "Learning & Development", roles: ["ROLE_EMPLOYEE", "ROLE_MANAGER", "ROLE_HR", "ROLE_ADMIN"] },
       {
         id: "reports",
         label: "Reports",
@@ -2362,6 +3008,7 @@ function DashboardPageContent() {
     const res = await hrmsService.getNotifications({ page: "0", size: "20" });
     setNotifications(toRows(res.data));
   }, []);
+  // (learning loaders moved above useEffects to avoid TDZ)
   const loadWorkforceOverviewReports = useCallback(async () => {
     const params = {
       page: 0,
@@ -5292,6 +5939,882 @@ function DashboardPageContent() {
                       Placeholder for {activeTab.replace("reports-", "section ")}. Share requirements and I will implement it.
                     </div>
                   )}
+                </div>
+              </section>
+            ) : null}
+
+            {activeTab === "learning" && !requiresSelfOnboarding ? (
+              <section className="space-y-4">
+                <div className="flex items-center justify-end">
+                  <button
+                    type="button"
+                    className="btn-primary px-3 py-2"
+                    onClick={() =>
+                      runAction("Load learning hub", async () => {
+                        await loadLearningTrainingsSafe();
+                        const trainingId = selectedLearningTrainingId.trim();
+                        if (trainingId) {
+                          await loadLearningDetailSafe(trainingId);
+                          await loadLearningRosterLists(trainingId);
+                        }
+                      })
+                    }
+                    disabled={actionLoading}
+                  >
+                    Refresh
+                  </button>
+                </div>
+
+                <div className="rounded-2xl border border-wt-border bg-wt-surface-1 p-5 space-y-3">
+                  <div className="flex items-center justify-between gap-2">
+                    <h4 className="font-semibold">Training Records</h4>
+                    <span className="text-xs text-wt-text-muted">{learningTrainings.length} training(s)</span>
+                  </div>
+                  {learningTrainings.length ? (
+                    <div className="wt-scroll-both max-h-[min(48vh,360px)] rounded-xl border border-wt-border">
+                      <table className="min-w-full text-sm">
+                        <thead className="bg-wt-surface-2 text-wt-text-muted">
+                          <tr>
+                            <th className="text-left px-3 py-2 font-medium whitespace-nowrap">id</th>
+                            <th className="text-left px-3 py-2 font-medium whitespace-nowrap">name</th>
+                            <th className="text-left px-3 py-2 font-medium whitespace-nowrap">category</th>
+                            <th className="text-left px-3 py-2 font-medium whitespace-nowrap">type</th>
+                            <th className="text-left px-3 py-2 font-medium whitespace-nowrap">status</th>
+                            <th className="text-left px-3 py-2 font-medium whitespace-nowrap">duration days</th>
+                            <th className="text-left px-3 py-2 font-medium whitespace-nowrap">actions</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {learningTrainings.map((row, idx) => {
+                            const id = String(row.id ?? "").trim();
+                            return (
+                              <tr key={`${id || "training"}-${idx}`} className="border-t border-wt-border">
+                                <td className="px-3 py-2 whitespace-nowrap">{id || "—"}</td>
+                                <td className="px-3 py-2 whitespace-nowrap">{String(row.name ?? "—")}</td>
+                                <td className="px-3 py-2 whitespace-nowrap">{String(row.category ?? "—")}</td>
+                                <td className="px-3 py-2 whitespace-nowrap">{String(row.type ?? "—")}</td>
+                                <td className="px-3 py-2 whitespace-nowrap">{String(row.status ?? "—")}</td>
+                                <td className="px-3 py-2 whitespace-nowrap">{String(row.duration_days ?? "—")}</td>
+                                <td className="px-3 py-2 whitespace-nowrap">
+                                  <div className="inline-flex items-center gap-1">
+                                    <button
+                                      type="button"
+                                      className="rounded-lg p-2 text-wt-text-muted hover:bg-wt-surface-1 hover:text-wt-text"
+                                      aria-label={`Edit training ${id || idx}`}
+                                      title="Edit training"
+                                      onClick={() => {
+                                        setSelectedLearningTrainingId(id);
+                                        setLearningTrainingForm((prev) => ({
+                                          ...prev,
+                                          name: String(row.name ?? "").trim(),
+                                          category: String(row.category ?? "TECHNICAL").trim(),
+                                          type: String(row.type ?? "OPTIONAL").trim(),
+                                          description: String(row.description ?? "").trim(),
+                                          duration_days: String(row.duration_days ?? "1").trim(),
+                                          status: String(row.status ?? "DRAFT").trim(),
+                                        }));
+                                      }}
+                                      disabled={!id || actionLoading}
+                                    >
+                                      <IconPencil />
+                                    </button>
+                                  </div>
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  ) : (
+                    <p className="text-sm text-wt-text-muted">No trainings loaded.</p>
+                  )}
+                </div>
+
+                {hasHrAccess ? (
+                  <div className="grid xl:grid-cols-2 gap-4">
+                    <div className="rounded-2xl border border-wt-border bg-wt-surface-1 p-5 space-y-3">
+                      <h4 className="font-semibold">Create / Update Training</h4>
+                      <div className="flex justify-end">
+                        <button
+                          type="button"
+                          className="btn-primary h-10 w-10 text-lg leading-none"
+                          title="Create training"
+                          aria-label="Create training"
+                          disabled={actionLoading}
+                          onClick={() =>
+                            (() => {
+                              setSelectedLearningTrainingId("");
+                              setLearningCreateTrainerId("");
+                              setLearningTrainingForm({
+                                name: "",
+                                category: "TECHNICAL",
+                                type: "OPTIONAL",
+                                description: "",
+                                duration_days: "1",
+                                status: "DRAFT",
+                              });
+                            })()
+                          }
+                        >
+                          +
+                        </button>
+                      </div>
+                      <div className="grid sm:grid-cols-2 gap-3">
+                        <InputField
+                          label="Name"
+                          value={learningTrainingForm.name}
+                          onChange={(v) => setLearningTrainingForm((p) => ({ ...p, name: v }))}
+                        />
+                        <SelectField
+                          label="Category"
+                          value={learningTrainingForm.category}
+                          options={["PROFESSIONAL", "TECHNICAL", "SOFT_SKILLS"]}
+                          onChange={(v) => setLearningTrainingForm((p) => ({ ...p, category: v }))}
+                        />
+                        <SelectField
+                          label="Type"
+                          value={learningTrainingForm.type}
+                          options={["MANDATORY", "OPTIONAL", "HYBRID"]}
+                          onChange={(v) => setLearningTrainingForm((p) => ({ ...p, type: v }))}
+                        />
+                        <InputField
+                          label="Duration (days)"
+                          value={learningTrainingForm.duration_days}
+                          onChange={(v) => setLearningTrainingForm((p) => ({ ...p, duration_days: v }))}
+                        />
+                        <SelectField
+                          label="Status"
+                          value={learningTrainingForm.status}
+                          options={["DRAFT", "SCHEDULED", "IN_PROGRESS", "COMPLETED", "CANCELLED"]}
+                          onChange={(v) => setLearningTrainingForm((p) => ({ ...p, status: v }))}
+                        />
+                        <InputField
+                          label="Description"
+                          value={learningTrainingForm.description}
+                          onChange={(v) => setLearningTrainingForm((p) => ({ ...p, description: v }))}
+                        />
+                        {!selectedLearningTrainingId ? (
+                          <div className="sm:col-span-2">
+                            <label className="text-xs text-wt-text-muted flex flex-col gap-1">
+                              Trainer (assigned when you create this training)
+                              <select
+                                className="input-field px-3 py-2 text-sm"
+                                value={learningCreateTrainerId}
+                                onChange={(e) => setLearningCreateTrainerId(e.target.value)}
+                              >
+                                <option value="">Select trainer (optional)</option>
+                                {learningTrainerOptions.map((trainer) => (
+                                  <option key={`create-trainer-${trainer.id}`} value={trainer.id}>
+                                    {trainer.label}
+                                  </option>
+                                ))}
+                              </select>
+                              {!learningTrainerOptions.length ? (
+                                <span className="text-[11px] text-wt-text-muted mt-1">
+                                  Load employees with Refresh on this tab.
+                                </span>
+                              ) : null}
+                            </label>
+                          </div>
+                        ) : null}
+                      </div>
+                      <div className="flex flex-wrap gap-2">
+                        <button
+                          type="button"
+                          className="btn-primary px-3 py-2"
+                          disabled={actionLoading || !selectedLearningTrainingId}
+                          onClick={() =>
+                            runAction("Update training", async () => {
+                              await hrmsService.updateTraining(selectedLearningTrainingId, {
+                                name: learningTrainingForm.name.trim() || undefined,
+                                category: learningTrainingForm.category,
+                                type: learningTrainingForm.type,
+                                description: learningTrainingForm.description.trim() || null,
+                                duration_days: Number(learningTrainingForm.duration_days || "1"),
+                                status: learningTrainingForm.status,
+                              });
+                              await loadLearningTrainingsSafe();
+                              await loadLearningDetailSafe(selectedLearningTrainingId);
+                            })
+                          }
+                        >
+                          Update Selected
+                        </button>
+                        <button
+                          type="button"
+                          className="btn-primary px-3 py-2"
+                          disabled={actionLoading}
+                          onClick={() =>
+                            runAction("Create training", async () => {
+                              const normalizedName = learningTrainingForm.name.trim();
+                              if (!normalizedName) {
+                                throw new Error("Training name is required.");
+                              }
+                              const createRes = await hrmsService.createTraining({
+                                name: normalizedName,
+                                category: learningTrainingForm.category,
+                                type: learningTrainingForm.type,
+                                description: learningTrainingForm.description.trim() || null,
+                                duration_days: Number(learningTrainingForm.duration_days || "1"),
+                              });
+                              const created = ((createRes as { data?: unknown }).data ?? createRes) as
+                                | Record<string, unknown>
+                                | null;
+                              const createdTrainingId = String(created?.id ?? "").trim();
+                              if (createdTrainingId && learningCreateTrainerId.trim()) {
+                                const idNum = await resolveLearningTrainerUserId(learningCreateTrainerId);
+                                await hrmsService.assignTrainers(createdTrainingId, [idNum]);
+                              }
+                              await loadLearningTrainingsSafe();
+                              if (createdTrainingId) {
+                                await loadLearningDetailSafe(createdTrainingId);
+                              }
+                              setSelectedLearningTrainingId("");
+                              setLearningCreateTrainerId("");
+                              setLearningTrainingForm({
+                                name: "",
+                                category: "TECHNICAL",
+                                type: "OPTIONAL",
+                                description: "",
+                                duration_days: "1",
+                                status: "DRAFT",
+                              });
+                            })
+                          }
+                        >
+                          Create New
+                        </button>
+                      </div>
+                    </div>
+
+                    <div className="rounded-2xl border border-wt-border bg-wt-surface-1 p-5 space-y-3">
+                      <h4 className="font-semibold">Sessions & Trainers</h4>
+                      <label className="text-xs text-wt-text-muted flex flex-col gap-1">
+                        Training
+                        <select
+                          className="input-field px-3 py-2 text-sm"
+                          value={selectedLearningTrainingId}
+                          onChange={(e) => setSelectedLearningTrainingId(e.target.value)}
+                        >
+                          <option value="">Select training</option>
+                          {learningTrainings.map((row) => {
+                            const id = String(row.id ?? "").trim();
+                            const name = String((row.name ?? id) || "Training").trim();
+                            return (
+                              <option key={`session-training-${id || name}`} value={id}>
+                                {name}
+                              </option>
+                            );
+                          })}
+                        </select>
+                      </label>
+                      <label className="text-xs text-wt-text-muted flex flex-col gap-1">
+                        Trainer
+                        <select
+                          className="input-field px-3 py-2 text-sm"
+                          value={selectedLearningTrainerId}
+                          onChange={(e) => setSelectedLearningTrainerId(e.target.value)}
+                        >
+                          <option value="">Select trainer</option>
+                          {learningTrainerOptions.map((trainer) => (
+                            <option key={trainer.id} value={trainer.id}>
+                              {trainer.label}
+                            </option>
+                          ))}
+                        </select>
+                        {!learningTrainerOptions.length ? (
+                          <span className="text-[11px] text-wt-text-muted mt-1">
+                            No employees loaded for trainer selection. Click Refresh.
+                          </span>
+                        ) : null}
+                      </label>
+                      <div className="flex flex-wrap gap-2">
+                        <button
+                          type="button"
+                          className="btn-primary px-3 py-2"
+                          disabled={actionLoading || !selectedLearningTrainingId || !selectedLearningTrainerId}
+                          onClick={() =>
+                            runAction("Assign trainers", async () => {
+                              const idNum = await resolveLearningTrainerUserId(selectedLearningTrainerId);
+                              await hrmsService.assignTrainers(selectedLearningTrainingId, [idNum]);
+                              await loadLearningTrainingsSafe();
+                              await loadLearningRosterLists(selectedLearningTrainingId);
+                            })
+                          }
+                        >
+                          Assign Trainers
+                        </button>
+                        <button
+                          type="button"
+                          className="btn-primary px-3 py-2"
+                          disabled={actionLoading || !selectedLearningTrainingId || !selectedLearningTrainerId}
+                          onClick={() =>
+                            runAction("Remove trainer", async () => {
+                              const idNum = await resolveLearningTrainerUserId(selectedLearningTrainerId);
+                              await hrmsService.removeTrainer(
+                                selectedLearningTrainingId,
+                                String(idNum)
+                              );
+                              await loadLearningTrainingsSafe();
+                              await loadLearningRosterLists(selectedLearningTrainingId);
+                            })
+                          }
+                        >
+                          Remove Trainer
+                        </button>
+                      </div>
+                      <div className="grid sm:grid-cols-2 gap-3">
+                        <InputField
+                          label="Session Date"
+                          type="date"
+                          value={learningSessionForm.session_date}
+                          onChange={(v) => setLearningSessionForm((p) => ({ ...p, session_date: v }))}
+                        />
+                        <InputField
+                          label="Start Time"
+                          type="time"
+                          value={learningSessionForm.start_time}
+                          onChange={(v) => setLearningSessionForm((p) => ({ ...p, start_time: v }))}
+                        />
+                        <InputField
+                          label="End Time"
+                          type="time"
+                          value={learningSessionForm.end_time}
+                          onChange={(v) => setLearningSessionForm((p) => ({ ...p, end_time: v }))}
+                        />
+                        <SelectField
+                          label="Mode"
+                          value={learningSessionForm.mode}
+                          options={["ONLINE", "OFFLINE", "HYBRID"]}
+                          onChange={(v) => setLearningSessionForm((p) => ({ ...p, mode: v }))}
+                        />
+                        <InputField
+                          label="Venue"
+                          value={learningSessionForm.venue}
+                          onChange={(v) => setLearningSessionForm((p) => ({ ...p, venue: v }))}
+                        />
+                        <InputField
+                          label="Meeting Link"
+                          value={learningSessionForm.meeting_link}
+                          onChange={(v) => setLearningSessionForm((p) => ({ ...p, meeting_link: v }))}
+                        />
+                      </div>
+                      <button
+                        type="button"
+                        className="btn-primary px-3 py-2"
+                        disabled={actionLoading || !selectedLearningTrainingId}
+                        onClick={() =>
+                          runAction("Create session", async () => {
+                            await hrmsService.createTrainingSession(selectedLearningTrainingId, {
+                              ...learningSessionForm,
+                              venue: learningSessionForm.venue.trim() || null,
+                              meeting_link: learningSessionForm.meeting_link.trim() || null,
+                            });
+                            setLearningSessionForm({
+                              session_date: "",
+                              start_time: "",
+                              end_time: "",
+                              mode: "ONLINE",
+                              venue: "",
+                              meeting_link: "",
+                            });
+                            await loadLearningDetailSafe(selectedLearningTrainingId);
+                          })
+                        }
+                      >
+                        Add Session
+                      </button>
+                      <DataTable
+                        title="Sessions"
+                        columns={["id", "session_date", "start_time", "end_time", "mode", "venue", "meeting_link"]}
+                        rows={learningSessions}
+                        emptyLabel="No sessions loaded."
+                      />
+                    </div>
+
+                    <div className="rounded-2xl border border-wt-border bg-wt-surface-1 p-5 space-y-3 xl:col-span-2">
+                      <h4 className="font-semibold">Trainers & participants</h4>
+                      <p className="text-xs text-wt-text-muted">
+                        Pick a training to load trainers. Add employees as participants below; participant data still
+                        loads in the background for attendance and scores. Use Refresh on this tab if employee dropdowns
+                        are empty.
+                      </p>
+                      <div className="grid sm:grid-cols-2 gap-3">
+                        <label className="text-xs text-wt-text-muted flex flex-col gap-1">
+                          Training
+                          <select
+                            className="input-field px-3 py-2 text-sm"
+                            value={selectedLearningTrainingId}
+                            onChange={(e) => setSelectedLearningTrainingId(e.target.value)}
+                          >
+                            <option value="">Select training</option>
+                            {learningTrainings.map((row) => {
+                              const id = String(row.id ?? "").trim();
+                              const name = String((row.name ?? id) || "Training").trim();
+                              return (
+                                <option key={`roster-training-${id || name}`} value={id}>
+                                  {name}
+                                </option>
+                              );
+                            })}
+                          </select>
+                        </label>
+                        <label className="text-xs text-wt-text-muted flex flex-col gap-1">
+                          Employee (add as participant)
+                          <select
+                            className="input-field px-3 py-2 text-sm"
+                            value={selectedLearningParticipantId}
+                            onChange={(e) => setSelectedLearningParticipantId(e.target.value)}
+                          >
+                            <option value="">Select employee</option>
+                            {learningTrainerOptions.map((emp) => (
+                              <option key={`roster-participant-${emp.id}`} value={emp.id}>
+                                {emp.label}
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+                      </div>
+                      <div className="flex flex-wrap gap-2">
+                        <button
+                          type="button"
+                          className="btn-primary px-3 py-2"
+                          disabled={actionLoading || !selectedLearningTrainingId || !selectedLearningParticipantId}
+                          onClick={() =>
+                            runAction("Add training participant", async () => {
+                              const idNum = await resolveLearningTrainerUserId(selectedLearningParticipantId);
+                              await hrmsService.addTrainingParticipants(selectedLearningTrainingId, {
+                                user_ids: [idNum],
+                                select_all: false,
+                              });
+                              await loadLearningTrainingsSafe();
+                              await loadLearningRosterLists(selectedLearningTrainingId);
+                            })
+                          }
+                        >
+                          Add participant
+                        </button>
+                        <button
+                          type="button"
+                          className="btn-primary px-3 py-2"
+                          disabled={actionLoading || !selectedLearningTrainingId.trim()}
+                          onClick={() =>
+                            runAction("Reload trainers and participants", async () => {
+                              await loadLearningRosterLists(selectedLearningTrainingId);
+                            })
+                          }
+                        >
+                          Reload lists
+                        </button>
+                        <button
+                          type="button"
+                          className="btn-primary px-3 py-2"
+                          disabled={actionLoading || !selectedLearningTrainingId.trim()}
+                          onClick={() =>
+                            runAction("List participants", async () => {
+                              await loadLearningParticipantsOnly(selectedLearningTrainingId);
+                            })
+                          }
+                        >
+                          List participants
+                        </button>
+                      </div>
+                      <label className="text-xs text-wt-text-muted flex flex-col gap-1">
+                        Participant (from API)
+                        <select
+                          className="input-field px-3 py-2 text-sm"
+                          value={selectedLearningApiParticipantId}
+                          onFocus={() => {
+                            if (selectedLearningTrainingId.trim()) {
+                              void loadLearningParticipantsOnly(selectedLearningTrainingId);
+                            }
+                          }}
+                          onChange={(e) => {
+                            const value = e.target.value;
+                            setSelectedLearningApiParticipantId(value);
+                            setLearningAttendanceForm((p) => ({ ...p, user_id: value }));
+                            setLearningScoreForm((p) => ({ ...p, user_id: value }));
+                          }}
+                        >
+                          <option value="">Select participant</option>
+                          {learningParticipantOptionsForAttendanceScores.map((emp) => (
+                            <option key={`api-participant-${emp.id}`} value={emp.id}>
+                              {emp.label}
+                            </option>
+                          ))}
+                        </select>
+                        {!learningParticipantOptionsForAttendanceScores.length ? (
+                          <span className="text-[11px] text-wt-text-muted mt-1">
+                            Click List participants to load from GET /trainings/{"{"}id{"}"}/participants.
+                          </span>
+                        ) : null}
+                      </label>
+                      <DataTable
+                        title="Participants (API)"
+                        columns={[
+                          "id",
+                          "training_id",
+                          "user_id",
+                          "name",
+                          "email",
+                          "participant_source",
+                          "enrollment_status",
+                        ]}
+                        rows={learningRosterParticipantRows}
+                        emptyLabel={
+                          selectedLearningTrainingId.trim()
+                            ? "No participants found for this training."
+                            : "Select a training, then click List participants."
+                        }
+                      />
+                      <div className="space-y-2 pt-2 border-t border-wt-border">
+                        <p className="text-sm font-medium">Trainers</p>
+                        <p className="text-[11px] text-wt-text-muted">
+                          Loaded from GET /trainings/{"{"}id{"}"}/trainers for the selected training.
+                        </p>
+                        <DataTable
+                          columns={["id", "user_id", "name", "email", "trainer_user_id"]}
+                          rows={learningRosterTrainerRows}
+                          emptyLabel={
+                            selectedLearningTrainingId.trim()
+                              ? "No trainers assigned for this training."
+                              : "Select a training to load trainers."
+                          }
+                        />
+                      </div>
+                    </div>
+
+                    <div className="rounded-2xl border border-wt-border bg-wt-surface-1 p-5 space-y-3">
+                      <h4 className="font-semibold">Materials, Assessments, Attendance & Scores</h4>
+                      <div className="grid sm:grid-cols-2 gap-3">
+                        <InputField
+                          label="Material Title"
+                          value={learningMaterialForm.title}
+                          onChange={(v) => setLearningMaterialForm((p) => ({ ...p, title: v }))}
+                        />
+                        <SelectField
+                          label="Material Visibility"
+                          value={learningMaterialForm.visibility}
+                          options={["EMPLOYEE", "HR_ONLY"]}
+                          onChange={(v) => setLearningMaterialForm((p) => ({ ...p, visibility: v }))}
+                        />
+                        <FileField label="Material PDF" accept=".pdf,application/pdf" onPick={setLearningMaterialFile} />
+                      </div>
+                      <button
+                        type="button"
+                        className="btn-primary px-3 py-2"
+                        disabled={actionLoading || !selectedLearningTrainingId || !learningMaterialFile}
+                        onClick={() =>
+                          runAction("Upload material", async () => {
+                            const materialFile = learningMaterialFile;
+                            if (!materialFile) return;
+                            await hrmsService.uploadTrainingMaterial(selectedLearningTrainingId, {
+                              title: learningMaterialForm.title.trim(),
+                              visibility: learningMaterialForm.visibility as "HR_ONLY" | "EMPLOYEE",
+                              materialFile,
+                            });
+                            await loadLearningDetailSafe(selectedLearningTrainingId);
+                          })
+                        }
+                      >
+                        Upload Material
+                      </button>
+                      <div className="grid sm:grid-cols-2 gap-3">
+                        <InputField
+                          label="Assessment Name"
+                          value={learningAssessmentForm.name}
+                          onChange={(v) => setLearningAssessmentForm((p) => ({ ...p, name: v }))}
+                        />
+                        <InputField
+                          label="Weight Percent"
+                          value={learningAssessmentForm.weight_percent}
+                          onChange={(v) => setLearningAssessmentForm((p) => ({ ...p, weight_percent: v }))}
+                        />
+                        <InputField
+                          label="Assessment Description"
+                          value={learningAssessmentForm.description}
+                          onChange={(v) => setLearningAssessmentForm((p) => ({ ...p, description: v }))}
+                        />
+                        <FileField label="Assessment PDF" accept=".pdf,application/pdf" onPick={setLearningAssessmentFile} />
+                      </div>
+                      <button
+                        type="button"
+                        className="btn-primary px-3 py-2"
+                        disabled={actionLoading || !selectedLearningTrainingId || !learningAssessmentFile}
+                        onClick={() =>
+                          runAction("Upload assessment", async () => {
+                            const assessmentFile = learningAssessmentFile;
+                            if (!assessmentFile) return;
+                            await hrmsService.uploadAssessment(selectedLearningTrainingId, {
+                              name: learningAssessmentForm.name.trim(),
+                              description: learningAssessmentForm.description.trim() || undefined,
+                              weight_percent: Number(learningAssessmentForm.weight_percent || "0"),
+                              assessmentFile,
+                            });
+                            await loadLearningDetailSafe(selectedLearningTrainingId);
+                          })
+                        }
+                      >
+                        Upload Assessment
+                      </button>
+                      <div className="space-y-3 border-t border-wt-border pt-3">
+                        <p className="text-xs text-wt-text-muted">
+                          Attendance is saved per <span className="font-medium text-wt-text">session</span>.{" "}
+                          <span className="font-medium text-wt-text">Employee</span> lists for attendance and scores
+                          come only from <span className="font-medium text-wt-text">training participants</span> (GET{" "}
+                          <code className="text-[11px]">/trainings/{"{id}"}/participants</code>) for the selected
+                          training — add people under Trainers &amp; participants, then Refresh if needed.
+                        </p>
+                        <label className="text-xs text-wt-text-muted flex flex-col gap-1">
+                          Session (for attendance)
+                          <select
+                            className="input-field px-3 py-2 text-sm"
+                            value={selectedLearningSessionId}
+                            onChange={(e) => setSelectedLearningSessionId(e.target.value)}
+                          >
+                            <option value="">Select session</option>
+                            {learningSessions.map((s, sidx) => {
+                              const sid = String(s.id ?? "").trim();
+                              const d = String(s.session_date ?? s.sessionDate ?? "").trim();
+                              const st = String(s.start_time ?? s.startTime ?? "").trim();
+                              const en = String(s.end_time ?? s.endTime ?? "").trim();
+                              const timePart =
+                                st && en ? `${st}–${en}` : st || en ? `${st}${en}` : "";
+                              const label =
+                                [d, timePart, sid ? `id ${sid}` : ""].filter(Boolean).join(" · ") ||
+                                `Session ${sidx + 1}`;
+                              return (
+                                <option key={`attendance-session-${sid || sidx}`} value={sid}>
+                                  {label}
+                                </option>
+                              );
+                            })}
+                          </select>
+                          {selectedLearningTrainingId.trim() && !learningSessions.length ? (
+                            <span className="text-[11px] text-wt-text-muted mt-1">
+                              No sessions for this training yet. Add one under{" "}
+                              <span className="font-medium">Sessions &amp; Trainers</span>, then pick it here.
+                            </span>
+                          ) : !selectedLearningTrainingId.trim() ? (
+                            <span className="text-[11px] text-wt-text-muted mt-1">
+                              Select a training (table or dropdowns above) to load its sessions.
+                            </span>
+                          ) : null}
+                        </label>
+                        <div className="grid sm:grid-cols-2 gap-3">
+                          <label className="text-xs text-wt-text-muted flex flex-col gap-1">
+                            Employee (attendance)
+                            <select
+                              className="input-field px-3 py-2 text-sm"
+                              value={learningAttendanceForm.user_id}
+                              onChange={(e) =>
+                                setLearningAttendanceForm((p) => ({ ...p, user_id: e.target.value }))
+                              }
+                              onFocus={() => {
+                                if (selectedLearningTrainingId.trim()) {
+                                  void loadLearningParticipantsOnly(selectedLearningTrainingId);
+                                }
+                              }}
+                            >
+                              <option value="">Select participant</option>
+                              {learningParticipantOptionsForAttendanceScores.map((emp) => (
+                                <option key={`attendance-emp-${emp.id}`} value={emp.id}>
+                                  {emp.label}
+                                </option>
+                              ))}
+                            </select>
+                            {selectedLearningTrainingId.trim() &&
+                            !learningParticipantOptionsForAttendanceScores.length ? (
+                              <span className="text-[11px] text-wt-text-muted mt-1">
+                                No participants for this training. Enroll them under Trainers &amp; participants
+                                (or self-enroll), then Refresh.
+                              </span>
+                            ) : null}
+                          </label>
+                          <SelectField
+                            label="Attendance Status"
+                            value={learningAttendanceForm.attendance_status}
+                            options={["PRESENT", "ABSENT"]}
+                            onChange={(v) => setLearningAttendanceForm((p) => ({ ...p, attendance_status: v }))}
+                          />
+                        </div>
+                      </div>
+                      <div className="flex flex-wrap gap-2">
+                        <button
+                          type="button"
+                          className="btn-primary px-3 py-2"
+                          disabled={
+                            actionLoading ||
+                            !selectedLearningTrainingId ||
+                            !selectedLearningSessionId ||
+                            !learningAttendanceForm.user_id.trim()
+                          }
+                          onClick={() =>
+                            runAction("Mark attendance", async () => {
+                              const userId = await resolveLearningTrainerUserId(
+                                learningAttendanceForm.user_id.trim()
+                              );
+                              await hrmsService.markAttendance(selectedLearningTrainingId, selectedLearningSessionId, {
+                                user_id: userId,
+                                attendance_status: learningAttendanceForm.attendance_status as "PRESENT" | "ABSENT",
+                              });
+                              await loadLearningDetailSafe(selectedLearningTrainingId, selectedLearningSessionId);
+                              await loadLearningRosterLists(selectedLearningTrainingId);
+                            })
+                          }
+                        >
+                          Mark Attendance
+                        </button>
+                        <button
+                          type="button"
+                          className="btn-primary px-3 py-2"
+                          disabled={actionLoading || !selectedLearningTrainingId || !selectedLearningSessionId}
+                          onClick={() =>
+                            runAction("Load attendance", async () => {
+                              const res = await hrmsService.getAttendance(
+                                selectedLearningTrainingId,
+                                selectedLearningSessionId
+                              );
+                              setLearningAttendanceRows(toPagedRows(res.data ?? res));
+                            })
+                          }
+                        >
+                          Load Attendance
+                        </button>
+                      </div>
+                      <div className="grid sm:grid-cols-2 gap-3">
+                        <label className="text-xs text-wt-text-muted flex flex-col gap-1">
+                          Employee (scores)
+                          <select
+                            className="input-field px-3 py-2 text-sm"
+                            value={learningScoreForm.user_id}
+                            onChange={(e) => setLearningScoreForm((p) => ({ ...p, user_id: e.target.value }))}
+                            onFocus={() => {
+                              if (selectedLearningTrainingId.trim()) {
+                                void loadLearningParticipantsOnly(selectedLearningTrainingId);
+                              }
+                            }}
+                          >
+                            <option value="">Select participant</option>
+                            {learningParticipantOptionsForAttendanceScores.map((emp) => (
+                              <option key={`scores-emp-${emp.id}`} value={emp.id}>
+                                {emp.label}
+                              </option>
+                            ))}
+                          </select>
+                          {selectedLearningTrainingId.trim() &&
+                          !learningParticipantOptionsForAttendanceScores.length ? (
+                            <span className="text-[11px] text-wt-text-muted mt-1">
+                              No participants for this training. Add them under Trainers &amp; participants, then
+                              Refresh.
+                            </span>
+                          ) : null}
+                        </label>
+                        <InputField
+                          label="Score (%)"
+                          value={learningScoreForm.score_percent}
+                          onChange={(v) => setLearningScoreForm((p) => ({ ...p, score_percent: v }))}
+                        />
+                      </div>
+                      <label className="text-xs text-wt-text-muted flex items-center gap-2">
+                        <input
+                          type="checkbox"
+                          checked={learningScoreForm.mark_completed}
+                          onChange={(e) => setLearningScoreForm((p) => ({ ...p, mark_completed: e.target.checked }))}
+                        />
+                        Mark completed
+                      </label>
+                      <button
+                        type="button"
+                        className="btn-primary px-3 py-2"
+                        disabled={
+                          actionLoading ||
+                          !selectedLearningTrainingId ||
+                          !learningScoreForm.user_id.trim()
+                        }
+                        onClick={() =>
+                          runAction("Submit scores", async () => {
+                            const userId = await resolveLearningTrainerUserId(learningScoreForm.user_id.trim());
+                            const assessId =
+                              learningAssessments.length > 0
+                                ? String(learningAssessments[0]?.id ?? "1").trim() || "1"
+                                : "1";
+                            const pct = Number(learningScoreForm.score_percent ?? "0");
+                            const scoresJson: Record<string, number> = {
+                              [assessId]: Number.isFinite(pct) ? pct : 0,
+                            };
+                            const res = await hrmsService.submitTrainingScores(selectedLearningTrainingId, {
+                              user_id: userId,
+                              scores_json: scoresJson,
+                              mark_completed: learningScoreForm.mark_completed,
+                            });
+                            const scoreRow = ((res as { data?: unknown }).data ?? res) as Record<string, unknown>;
+                            setLearningScores((prev) => [scoreRow, ...prev].slice(0, 20));
+                            await loadLearningDetailSafe(selectedLearningTrainingId);
+                            await loadLearningRosterLists(selectedLearningTrainingId);
+                          })
+                        }
+                      >
+                        Submit Scores
+                      </button>
+                    </div>
+                  </div>
+                ) : null}
+
+                <div className={`grid gap-4 ${hasHrAccess ? "" : "xl:grid-cols-2"}`}>
+                  {!hasHrAccess ? (
+                    <div className="rounded-2xl border border-wt-border bg-wt-surface-1 p-5 space-y-3">
+                      <h4 className="font-semibold">Open Trainings (Self-Enroll)</h4>
+                      <p className="text-xs text-wt-text-muted">
+                        Pick a training in the table above, then enroll yourself.
+                      </p>
+                      <DataTable
+                        columns={["id", "name", "category", "type", "status", "duration_days"]}
+                        rows={learningOpenTrainings}
+                        emptyLabel="No open trainings."
+                      />
+                      <button
+                        type="button"
+                        className="btn-primary px-3 py-2"
+                        disabled={actionLoading || !selectedLearningTrainingId}
+                        onClick={() =>
+                          runAction("Self-enroll training", async () => {
+                            await hrmsService.selfEnrollTraining(selectedLearningTrainingId);
+                            await loadLearningTrainingsSafe();
+                          })
+                        }
+                      >
+                        Enroll to Selected Training
+                      </button>
+                    </div>
+                  ) : null}
+                  <div className="rounded-2xl border border-wt-border bg-wt-surface-1 p-5 space-y-3">
+                    <DataTable
+                      title="Materials"
+                      columns={["id", "training_id", "title", "material_url", "visibility"]}
+                      rows={learningMaterials}
+                      emptyLabel="No materials loaded."
+                    />
+                    <DataTable
+                      title="Assessments"
+                      columns={["id", "training_id", "name", "description", "file_url", "weight_percent"]}
+                      rows={learningAssessments}
+                      emptyLabel="No assessments loaded."
+                    />
+                    <DataTable
+                      title="Attendance"
+                      columns={["id", "training_session_id", "training_id", "user_id", "attendance_status"]}
+                      rows={learningAttendanceRows}
+                      emptyLabel="No attendance rows loaded."
+                    />
+                    <DataTable
+                      title="Latest Scores"
+                      columns={["id", "training_id", "user_id", "scores_json", "final_score_percent", "is_completed"]}
+                      rows={learningScores}
+                      emptyLabel="No scores submitted in this session."
+                    />
+                  </div>
                 </div>
               </section>
             ) : null}

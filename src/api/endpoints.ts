@@ -74,6 +74,34 @@ export const endpoints = {
     leaveSummary: `${api}/leave-summary`,
   },
 
+  learning: {
+    trainings: `${api}/trainings`,
+    trainingById: (trainingId: string | number) => `${api}/trainings/${encodeURIComponent(String(trainingId))}`,
+    trainers: (trainingId: string | number) =>
+      `${api}/trainings/${encodeURIComponent(String(trainingId))}/trainers`,
+    trainerById: (trainingId: string | number, trainerUserId: string | number) =>
+      `${api}/trainings/${encodeURIComponent(String(trainingId))}/trainers/${encodeURIComponent(String(trainerUserId))}`,
+    sessions: (trainingId: string | number) =>
+      `${api}/trainings/${encodeURIComponent(String(trainingId))}/sessions`,
+    participants: (trainingId: string | number) =>
+      `${api}/trainings/${encodeURIComponent(String(trainingId))}/participants`,
+    participantByUserId: (trainingId: string | number, userId: string | number) =>
+      `${api}/trainings/${encodeURIComponent(String(trainingId))}/participants/${encodeURIComponent(String(userId))}`,
+    enroll: (trainingId: string | number) =>
+      `${api}/trainings/${encodeURIComponent(String(trainingId))}/enroll`,
+    open: `${api}/trainings/open`,
+    materials: (trainingId: string | number) =>
+      `${api}/trainings/${encodeURIComponent(String(trainingId))}/materials`,
+    attendance: (trainingId: string | number, sessionId: string | number) =>
+      `${api}/trainings/${encodeURIComponent(String(trainingId))}/sessions/${encodeURIComponent(String(sessionId))}/attendance`,
+    assessments: (trainingId: string | number) =>
+      `${api}/trainings/${encodeURIComponent(String(trainingId))}/assessments`,
+    scores: (trainingId: string | number) =>
+      `${api}/trainings/${encodeURIComponent(String(trainingId))}/scores`,
+    analytics: (trainingId: string | number) =>
+      `${api}/trainings/${encodeURIComponent(String(trainingId))}/analytics`,
+  },
+
   notifications: {
     root: `${api}/notifications`,
     readById: (notificationId: string) =>
