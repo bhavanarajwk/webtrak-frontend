@@ -152,6 +152,29 @@ body::-webkit-scrollbar {
   display: none;
 }
 
+/* Dashboard main pane: always scrollable; thin scrollbar for discoverability */
+.wt-page-scroll {
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: auto;
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in oklab, var(--wt-text-muted) 45%, transparent) transparent;
+}
+
+.wt-page-scroll::-webkit-scrollbar {
+  display: block;
+  width: 8px;
+}
+
+.wt-page-scroll::-webkit-scrollbar-thumb {
+  background: color-mix(in oklab, var(--wt-text-muted) 40%, transparent);
+  border-radius: 999px;
+}
+
+.wt-page-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+
 /* Glass card */
 .glass {
   background: color-mix(in oklab, var(--wt-surface-1) 85%, transparent);

@@ -13,7 +13,7 @@ export function TrainingScopePicker({
 
   return (
     <label className="text-xs text-wt-text-muted flex flex-col gap-1 max-w-xl">
-      Training context
+      Training name
       <select
         className="input-field px-3 py-2 text-sm"
         value={trainingId}

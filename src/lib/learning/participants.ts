@@ -188,7 +188,7 @@ export function participantRowUserId(row: Record<string, unknown>): string {
 /** Human-readable label for a participant row (name, email, or fallback). */
 export function participantRowDisplayLabel(row: Record<string, unknown>, userId: string): string {
   if (userId.startsWith("email:")) {
-    return userId.slice("email:".length) || "Participant";
+    return userId.slice("email:".length) || "Trainee";
   }
   const nested =
     (row.user as Record<string, unknown> | undefined) ??
@@ -241,4 +241,45 @@ export function participantTrainerDropdownOptions(
   return Array.from(map.entries())
     .map(([id, label]) => ({ id, label }))
     .sort((a, b) => a.label.localeCompare(b.label, undefined, { sensitivity: "base" }));
+}
+
+export type TraineeTableRow = {
+  key: string;
+  userId: string;
+  name: string;
+  email: string;
+  enrollmentStatus: string;
+};
+
+/** Rows for attendance/scores tables from GET …/trainings/:id/participants. */
+export function traineeTableRowsFromParticipants(
+  rows: Array<Record<string, unknown>> | undefined | null
+): TraineeTableRow[] {
+  if (!rows?.length) return [];
+  return normalizeParticipantRows(rows)
+    .map((row, idx) => {
+      const userId = participantRowUserId(row);
+      if (!userId) return null;
+      const nested =
+        (row.user as Record<string, unknown> | undefined) ??
+        (row.employee as Record<string, unknown> | undefined);
+      const email = String(
+        row.email ??
+          row.user_email ??
+          row.userEmail ??
+          nested?.email ??
+          nested?.user_email ??
+          ""
+      ).trim();
+      return {
+        key: userId,
+        userId,
+        name: participantRowDisplayLabel(row, userId),
+        email,
+        enrollmentStatus: String(
+          row.enrollment_status ?? row.enrollmentStatus ?? "—"
+        ).trim(),
+      };
+    })
+    .filter((r): r is TraineeTableRow => Boolean(r));
 }

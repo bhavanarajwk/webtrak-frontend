@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
+import { LearningPageShell } from "@/components/learning-development/LearningPageShell";
 
 export default function LearningDevelopmentLayout({ children }: { children: ReactNode }) {
-  return <div className="min-h-full">{children}</div>;
+  return <LearningPageShell>{children}</LearningPageShell>;
 }

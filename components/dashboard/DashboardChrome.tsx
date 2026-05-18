@@ -135,8 +135,9 @@ export function DashboardChrome({ children }: { children: ReactNode }) {
   }, [pathname]);
 
   return (
-    <div className="flex min-h-screen flex-col bg-wt-bg text-wt-text lg:flex-row">
-      <aside className="wt-scroll flex max-h-[min(38vh,280px)] shrink-0 flex-col border-b border-wt-border bg-wt-surface-1 p-4 lg:max-h-none lg:min-h-0 lg:w-[250px] lg:shrink-0 lg:border-b-0 lg:border-r lg:p-5">
+    <div className="wt-page-scroll h-dvh overflow-y-auto bg-wt-bg text-wt-text">
+      <div className="flex min-h-full max-lg:flex-col lg:flex-row">
+      <aside className="sticky top-0 z-20 flex max-h-[min(36vh,260px)] shrink-0 flex-col border-b border-wt-border bg-wt-surface-1 p-4 max-lg:relative max-lg:min-h-0 lg:h-dvh lg:max-h-dvh lg:w-[250px] lg:border-b-0 lg:border-r lg:p-5">
         <div className="mb-4 shrink-0">
           <WebTrakBrand variant="sidebar" />
         </div>
@@ -257,7 +258,7 @@ export function DashboardChrome({ children }: { children: ReactNode }) {
       </aside>
 
       <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-        <header className="shrink-0 border-b border-wt-border px-6 py-4 flex items-center justify-between gap-4">
+        <header className="sticky top-0 z-10 shrink-0 border-b border-wt-border bg-wt-bg px-6 py-4 flex items-center justify-between gap-4">
           <div>
             <h2 className="text-xl font-semibold">
               {activeTab === "profile" && !isLearningRoute ? "My profile" : null}
@@ -378,7 +379,8 @@ export function DashboardChrome({ children }: { children: ReactNode }) {
           </div>
         </header>
 
-        <div className="min-h-0 flex-1 overflow-auto">{children}</div>
+        <div className="min-w-0 flex-1">{children}</div>
+      </div>
       </div>
     </div>
   );

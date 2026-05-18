@@ -12,6 +12,7 @@ import { useDashboardNav } from "@/components/dashboard/DashboardNavContext";
 import { dashboardNavigation, filterVisibleNavigation } from "@/config/dashboardNavigation";
 import { toRows, toPagedRows } from "@/src/lib/apiRows";
 import { AllocationExtensionPanel } from "@/app/(protected)/dashboard/AllocationExtensionPanel";
+import { AccountManagerSelect } from "@/components/allocation/AccountManagerSelect";
 
 const HARDCODED_DEPARTMENT_OPTIONS = [
   "Developer",
@@ -3802,8 +3803,7 @@ function DashboardPageContent() {
                           value={projectForm.client_name}
                           onChange={(v) => setProjectForm((p) => ({ ...p, client_name: v }))}
                         />
-                        <InputField
-                          label="Account manager"
+                        <AccountManagerSelect
                           value={projectForm.account_manager}
                           onChange={(v) => setProjectForm((p) => ({ ...p, account_manager: v }))}
                         />

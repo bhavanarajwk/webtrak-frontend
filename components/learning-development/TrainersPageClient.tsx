@@ -4,10 +4,10 @@ import Link from "next/link";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo, useState } from "react";
 import { useAuth } from "@/app/context/AuthContext";
-import { useTrainingParticipants, useTrainingTrainers } from "@/components/learning-development/hooks/useLearningTrainings";
+import { useTrainingTrainers } from "@/components/learning-development/hooks/useLearningTrainings";
+import { useLearningTrainerDirectory } from "@/components/learning-development/hooks/useLearningTrainerDirectory";
 import { TrainingScopePicker } from "@/components/learning-development/TrainingScopePicker";
 import { DataTable } from "@/components/learning-development/ui/forms";
-import { participantTrainerDropdownOptions } from "@/src/lib/learning/participants";
 import { resolveLearningTrainerUserId } from "@/src/lib/learning/resolveTrainerUserId";
 import { ApiError } from "@/src/api/error";
 import { hrmsService } from "@/src/services/hrms.service";
@@ -21,7 +21,7 @@ export function TrainersPageClient() {
   const [trainerPick, setTrainerPick] = useState("");
   const qc = useQueryClient();
   const trainersQ = useTrainingTrainers(trainingId, Boolean(trainingId.trim()));
-  const participantsQ = useTrainingParticipants(trainingId, Boolean(trainingId.trim()));
+  const onboardQ = useLearningTrainerDirectory();
 
   const assignedTrainerUserIds = useMemo(() => {
     const rows = trainersQ.data ?? [];
@@ -29,17 +29,16 @@ export function TrainersPageClient() {
     for (const r of rows) {
       const u = String(
         r.trainer_user_id ?? r.trainerUserId ?? r.user_id ?? r.userId ?? ""
-      )
-        .trim();
+      ).trim();
       if (u && Number(u) > 0) ids.add(u);
     }
     return ids;
   }, [trainersQ.data]);
 
-  const trainerOptions = useMemo(() => {
-    const base = participantTrainerDropdownOptions(participantsQ.data ?? []);
-    return base.filter((o) => !assignedTrainerUserIds.has(o.id));
-  }, [participantsQ.data, assignedTrainerUserIds]);
+  const trainerOptions = useMemo(
+    () => (onboardQ.data ?? []).filter((o) => !assignedTrainerUserIds.has(o.id)),
+    [onboardQ.data, assignedTrainerUserIds]
+  );
 
   useEffect(() => {
     setTrainerPick("");
@@ -56,7 +55,11 @@ export function TrainersPageClient() {
       const idNum = await resolveLearningTrainerUserId(trainerPick);
       await hrmsService.assignTrainers(trainingId, [idNum]);
     },
-    onSuccess: async () => qc.invalidateQueries({ queryKey: ["learning", "trainers", trainingId] }),
+    onSuccess: async () => {
+      setTrainerPick("");
+      await qc.invalidateQueries({ queryKey: ["learning", "trainers", trainingId] });
+      await qc.invalidateQueries({ queryKey: ["learning", "training", trainingId] });
+    },
   });
 
   const removeMut = useMutation({
@@ -64,7 +67,11 @@ export function TrainersPageClient() {
       const idNum = await resolveLearningTrainerUserId(trainerPick);
       await hrmsService.removeTrainer(trainingId, String(idNum));
     },
-    onSuccess: async () => qc.invalidateQueries({ queryKey: ["learning", "trainers", trainingId] }),
+    onSuccess: async () => {
+      setTrainerPick("");
+      await qc.invalidateQueries({ queryKey: ["learning", "trainers", trainingId] });
+      await qc.invalidateQueries({ queryKey: ["learning", "training", trainingId] });
+    },
   });
 
   return (
@@ -75,7 +82,10 @@ export function TrainersPageClient() {
           <p className="text-sm text-wt-text-muted mt-1">Assign or remove trainers per training.</p>
         </div>
         {trainingId ? (
-          <Link href={`/dashboard/learning-development/trainings/${encodeURIComponent(trainingId)}?tab=trainers`} className="text-sm font-medium text-indigo-600 hover:underline self-center">
+          <Link
+            href={`/dashboard/learning-development/trainings/${encodeURIComponent(trainingId)}?tab=trainers`}
+            className="text-sm font-medium text-indigo-600 hover:underline self-center"
+          >
             Detail view
           </Link>
         ) : null}
@@ -88,8 +98,12 @@ export function TrainersPageClient() {
           <div className="grid sm:grid-cols-2 gap-4 items-end">
             <label className="text-xs text-wt-text-muted flex flex-col gap-1">
               Trainer
-              <select className="input-field px-3 py-2 text-sm" value={trainerPick} onChange={(e) => setTrainerPick(e.target.value)}>
-                <option value="">Select participant</option>
+              <select
+                className="input-field px-3 py-2 text-sm"
+                value={trainerPick}
+                onChange={(e) => setTrainerPick(e.target.value)}
+              >
+                <option value="">Select trainer</option>
                 {trainerOptions.map((o) => (
                   <option key={o.id} value={o.id}>
                     {o.label}
@@ -104,7 +118,8 @@ export function TrainersPageClient() {
                 disabled={assignMut.isPending || !trainerPick || !trainingId}
                 onClick={() =>
                   assignMut.mutate(undefined, {
-                    onError: (e) => alert(e instanceof ApiError ? e.message : e instanceof Error ? e.message : String(e)),
+                    onError: (e) =>
+                      alert(e instanceof ApiError ? e.message : e instanceof Error ? e.message : String(e)),
                   })
                 }
               >
@@ -116,7 +131,8 @@ export function TrainersPageClient() {
                 disabled={removeMut.isPending || !trainerPick || !trainingId}
                 onClick={() =>
                   removeMut.mutate(undefined, {
-                    onError: (e) => alert(e instanceof ApiError ? e.message : e instanceof Error ? e.message : String(e)),
+                    onError: (e) =>
+                      alert(e instanceof ApiError ? e.message : e instanceof Error ? e.message : String(e)),
                   })
                 }
               >
@@ -124,8 +140,13 @@ export function TrainersPageClient() {
               </button>
             </div>
           </div>
-          {trainingId && !participantsQ.isLoading && trainerOptions.length === 0 ? (
-            <p className="text-xs text-wt-text-muted">No participants on this training yet. Add participants first, then assign a trainer.</p>
+          {onboardQ.isLoading ? (
+            <p className="text-xs text-wt-text-muted">Loading employees from onboard list…</p>
+          ) : null}
+          {trainingId && !onboardQ.isLoading && trainerOptions.length === 0 ? (
+            <p className="text-xs text-wt-text-muted">
+              No available employees to assign, or all onboard employees are already trainers for this training.
+            </p>
           ) : null}
         </section>
       ) : (
@@ -133,7 +154,11 @@ export function TrainersPageClient() {
       )}
 
       <section className="rounded-2xl border border-wt-border bg-wt-surface-1 p-5">
-        <DataTable columns={["id", "user_id", "name", "email", "trainer_user_id"]} rows={trainersQ.data ?? []} emptyLabel="No trainers loaded." />
+        <DataTable
+          columns={["id", "user_id", "name", "email", "trainer_user_id"]}
+          rows={trainersQ.data ?? []}
+          emptyLabel="No trainers loaded."
+        />
       </section>
     </div>
   );

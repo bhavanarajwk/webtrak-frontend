@@ -5,7 +5,7 @@ export const learningSubNav = [
   { href: `${LEARNING_BASE}/trainings`, label: "Trainings", segment: "trainings" },
   { href: `${LEARNING_BASE}/sessions`, label: "Sessions", segment: "sessions" },
   { href: `${LEARNING_BASE}/trainers`, label: "Trainers", segment: "trainers" },
-  { href: `${LEARNING_BASE}/participants`, label: "Participants", segment: "participants" },
+  { href: `${LEARNING_BASE}/participants`, label: "Trainees", segment: "participants" },
   { href: `${LEARNING_BASE}/materials`, label: "Materials", segment: "materials" },
   { href: `${LEARNING_BASE}/assessments`, label: "Assessments", segment: "assessments" },
   { href: `${LEARNING_BASE}/attendance`, label: "Attendance", segment: "attendance" },

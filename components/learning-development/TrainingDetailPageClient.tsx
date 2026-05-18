@@ -17,14 +17,14 @@ import {
 import { useLearningTrainerDirectory } from "@/components/learning-development/hooks/useLearningTrainerDirectory";
 import { DataTable, FileField, InputField, SelectField } from "@/components/learning-development/ui/forms";
 import { resolveLearningTrainerUserId } from "@/src/lib/learning/resolveTrainerUserId";
-import { participantTrainerDropdownOptions } from "@/src/lib/learning/participants";
+import { participantRowUserId } from "@/src/lib/learning/participants";
 import { hrmsService } from "@/src/services/hrms.service";
 
 const TABS = [
   { id: "overview", label: "Overview" },
   { id: "sessions", label: "Sessions" },
   { id: "trainers", label: "Trainers" },
-  { id: "participants", label: "Participants" },
+  { id: "participants", label: "Trainees" },
   { id: "materials", label: "Materials" },
   { id: "assessments", label: "Assessments" },
 ] as const;
@@ -51,18 +51,35 @@ export function TrainingDetailPageClient({ trainingId }: { trainingId: string })
   const analyticsQ = useTrainingAnalytics(tid, Boolean(tid));
   const directoryQ = useLearningTrainerDirectory();
 
-  const trainerOptionsFromParticipants = useMemo(() => {
-    const base = participantTrainerDropdownOptions(participantsQ.data ?? []);
-    const assigned = new Set<string>();
+  const assignedTrainerUserIds = useMemo(() => {
+    const ids = new Set<string>();
     for (const r of trainersQ.data ?? []) {
       const u = String(
         r.trainer_user_id ?? r.trainerUserId ?? r.user_id ?? r.userId ?? ""
-      )
-        .trim();
-      if (u && Number(u) > 0) assigned.add(u);
+      ).trim();
+      if (u && Number(u) > 0) ids.add(u);
     }
-    return base.filter((o) => !assigned.has(o.id));
-  }, [participantsQ.data, trainersQ.data]);
+    return ids;
+  }, [trainersQ.data]);
+
+  const trainerOptions = useMemo(
+    () => (directoryQ.data ?? []).filter((o) => !assignedTrainerUserIds.has(o.id)),
+    [directoryQ.data, assignedTrainerUserIds]
+  );
+
+  const enrolledUserIds = useMemo(() => {
+    const ids = new Set<string>();
+    for (const row of participantsQ.data ?? []) {
+      const id = participantRowUserId(row);
+      if (id) ids.add(id);
+    }
+    return ids;
+  }, [participantsQ.data]);
+
+  const addTraineeOptions = useMemo(
+    () => (directoryQ.data ?? []).filter((o) => !enrolledUserIds.has(o.id)),
+    [directoryQ.data, enrolledUserIds]
+  );
 
   const training = detailQ.data ?? {};
 
@@ -110,7 +127,10 @@ export function TrainingDetailPageClient({ trainingId }: { trainingId: string })
       const idNum = await resolveLearningTrainerUserId(trainerPick);
       await hrmsService.assignTrainers(tid, [idNum]);
     },
-    onSuccess: async () => qc.invalidateQueries({ queryKey: ["learning", "trainers", tid] }),
+    onSuccess: async () => {
+      await qc.invalidateQueries({ queryKey: ["learning", "trainers", tid] });
+      await qc.invalidateQueries({ queryKey: ["learning", "training", tid] });
+    },
   });
 
   const removeTrainerMut = useMutation({
@@ -118,7 +138,10 @@ export function TrainingDetailPageClient({ trainingId }: { trainingId: string })
       const idNum = await resolveLearningTrainerUserId(trainerPick);
       await hrmsService.removeTrainer(tid, String(idNum));
     },
-    onSuccess: async () => qc.invalidateQueries({ queryKey: ["learning", "trainers", tid] }),
+    onSuccess: async () => {
+      await qc.invalidateQueries({ queryKey: ["learning", "trainers", tid] });
+      await qc.invalidateQueries({ queryKey: ["learning", "training", tid] });
+    },
   });
 
   const addParticipantMut = useMutation({
@@ -289,8 +312,8 @@ export function TrainingDetailPageClient({ trainingId }: { trainingId: string })
               <label className="text-xs text-wt-text-muted flex flex-col gap-1">
                 Trainer
                 <select className="input-field px-3 py-2 text-sm" value={trainerPick} onChange={(e) => setTrainerPick(e.target.value)}>
-                  <option value="">Select participant</option>
-                  {trainerOptionsFromParticipants.map((o) => (
+                  <option value="">Select trainer</option>
+                  {trainerOptions.map((o) => (
                     <option key={o.id} value={o.id}>
                       {o.label}
                     </option>
@@ -313,14 +336,14 @@ export function TrainingDetailPageClient({ trainingId }: { trainingId: string })
 
       {safeTab === "participants" ? (
         <section className="rounded-2xl border border-wt-border bg-wt-surface-1 p-5 space-y-4">
-          <h2 className="font-semibold">Participants</h2>
+          <h2 className="font-semibold">Trainees</h2>
           {hasHrAccess ? (
             <div className="grid sm:grid-cols-2 gap-4 items-end">
               <label className="text-xs text-wt-text-muted flex flex-col gap-1">
-                Employee
+                Add trainee
                 <select className="input-field px-3 py-2 text-sm" value={participantPick} onChange={(e) => setParticipantPick(e.target.value)}>
-                  <option value="">Select</option>
-                  {(directoryQ.data ?? []).map((o) => (
+                  <option value="">Select trainee</option>
+                  {addTraineeOptions.map((o) => (
                     <option key={o.id} value={o.id}>
                       {o.label}
                     </option>
@@ -328,14 +351,14 @@ export function TrainingDetailPageClient({ trainingId }: { trainingId: string })
                 </select>
               </label>
               <button type="button" className="btn-primary px-3 py-2 text-sm sm:mb-0 disabled:opacity-40" disabled={addParticipantMut.isPending || !participantPick} onClick={() => addParticipantMut.mutate()}>
-                Add participant
+                Add trainee
               </button>
             </div>
           ) : null}
           <DataTable
             columns={["id", "training_id", "user_id", "name", "email", "enrollment_status"]}
             rows={participantsQ.data ?? []}
-            emptyLabel="No participants."
+            emptyLabel="No trainees enrolled."
           />
         </section>
       ) : null}

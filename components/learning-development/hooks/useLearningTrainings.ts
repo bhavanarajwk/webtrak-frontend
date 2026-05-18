@@ -111,22 +111,42 @@ export function useTrainingTrainers(trainingId: string | undefined, enabled: boo
     queryKey: ["learning", "trainers", trainingId],
     enabled: Boolean(enabled && trainingId?.trim()),
     queryFn: async () => {
-      const res = await hrmsService.getTrainingTrainers(trainingId!);
-      const data = (res as { data?: unknown }).data ?? res;
-      const asRows = toPagedRows(data);
-      if (asRows.length) return asRows;
-      if (data && typeof data === "object" && !Array.isArray(data)) {
-        const o = data as Record<string, unknown>;
-        const ids = o.trainer_user_ids ?? o.trainerUserIds;
-        if (Array.isArray(ids) && ids.length) {
-          return ids.map((id, idx) => ({
-            id: idx + 1,
-            trainer_user_id: id,
-            user_id: id,
-          })) as Array<Record<string, unknown>>;
-        }
+      // Backend exposes POST/DELETE on /trainers; list comes from training detail (trainer_user_ids).
+      const res = await hrmsService.getTrainingById(trainingId!);
+      const data = ((res as { data?: unknown }).data ?? res) as Record<string, unknown>;
+      const ids = data.trainer_user_ids ?? data.trainerUserIds;
+      if (!Array.isArray(ids) || !ids.length) return [];
+
+      let onboardRows: Array<Record<string, unknown>> = [];
+      try {
+        const onboardRes = await hrmsService.getOnboardList({ page: "0", size: "500" });
+        onboardRows = toPagedRows((onboardRes as { data?: unknown }).data ?? onboardRes);
+      } catch {
+        onboardRows = [];
       }
-      return [];
+
+      const labelByUserId = new Map<string, { name: string; email: string }>();
+      for (const row of onboardRows) {
+        const uid = String(
+          row.user_id ?? row.userId ?? row.emp_id ?? row.empId ?? row.id ?? ""
+        ).trim();
+        if (!uid || !Number(uid)) continue;
+        const name = String(row.name ?? "Employee").trim();
+        const email = String(row.email ?? row.user_email ?? row.userEmail ?? "").trim();
+        labelByUserId.set(uid, { name, email });
+      }
+
+      return ids.map((id, idx) => {
+        const uid = String(id).trim();
+        const labels = labelByUserId.get(uid);
+        return {
+          id: idx + 1,
+          trainer_user_id: uid,
+          user_id: uid,
+          name: labels?.name ?? `User #${uid}`,
+          email: labels?.email ?? "—",
+        };
+      }) as Array<Record<string, unknown>>;
     },
   });
 }
