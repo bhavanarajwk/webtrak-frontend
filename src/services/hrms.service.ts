@@ -84,6 +84,7 @@ export const hrmsService = {
     payload: {
       last_working_day: string;
       separation_type: "VOLUNTARY" | "INVOLUNTARY";
+      resignation_date?: string;
       reason?: string;
       critical_skill?: string;
       is_regretted?: boolean;

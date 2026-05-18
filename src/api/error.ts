@@ -29,6 +29,7 @@ export function parseApiErrorMessage(
   payload: unknown,
   fallback: string
 ): string {
+  if (typeof payload === "string" && payload.trim()) return payload.trim();
   if (!payload || typeof payload !== "object") return fallback;
   const body = payload as ApiErrorPayload;
 

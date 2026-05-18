@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { Suspense, useEffect, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import {
   getGoogleSignInUrl,
@@ -102,7 +102,7 @@ function ErrorBanner({ message }: { message: string }) {
 /* Main page                                                             */
 /* ------------------------------------------------------------------ */
 
-export default function LoginPage() {
+function LoginPageInner() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const { status, refresh } = useAuth();
@@ -218,5 +218,20 @@ export default function LoginPage() {
         © {new Date().getFullYear()} WebTrak. All rights reserved.
       </p>
     </main>
+  );
+}
+
+export default function LoginPage() {
+  return (
+    <Suspense
+      fallback={
+        <div className="relative flex min-h-screen items-center justify-center px-6">
+          <MeshBackground />
+          <p className="relative z-10 text-sm text-slate-400">Loading…</p>
+        </div>
+      }
+    >
+      <LoginPageInner />
+    </Suspense>
   );
 }

@@ -1,6 +1,5 @@
 "use client";
 
-import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState, Suspense } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useAuth } from "@/app/context/AuthContext";
@@ -9,8 +8,11 @@ import { endpoints } from "@/src/api/endpoints";
 import { hrmsService, type PagedData } from "@/src/services/hrms.service";
 import { useOverviewData } from "@/src/hooks/useOverviewData";
 import { ApiError } from "@/src/api/error";
-import { WebTrakBrand } from "@/app/components/WebTrakBrand";
+import { useDashboardNav } from "@/components/dashboard/DashboardNavContext";
+import { dashboardNavigation, filterVisibleNavigation } from "@/config/dashboardNavigation";
+import { toRows, toPagedRows } from "@/src/lib/apiRows";
 import { AllocationExtensionPanel } from "@/app/(protected)/dashboard/AllocationExtensionPanel";
+import { AccountManagerSelect } from "@/components/allocation/AccountManagerSelect";
 
 const HARDCODED_DEPARTMENT_OPTIONS = [
   "Developer",
@@ -78,54 +80,6 @@ function IconTrash({ className = "" }: { className?: string }) {
   );
 }
 
-function IconSettings({ className = "" }: { className?: string }) {
-  return (
-    <svg
-      className={`h-4 w-4 shrink-0 ${className}`}
-      viewBox="0 0 24 24"
-      fill="currentColor"
-      aria-hidden
-    >
-      <path d="M19.14 12.94c.04-.31.06-.63.06-.94 0-.31-.02-.63-.06-.94l2.03-1.58a.49.49 0 0 0 .12-.61l-1.92-3.32a.488.488 0 0 0-.59-.22l-2.39.96c-.52-.4-1.08-.73-1.69-.98l-.36-2.54a.484.484 0 0 0-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.61.25-1.17.59-1.69.98l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.04.31-.06.63-.06.94s.02.63.06.94l-2.03 1.58a.49.49 0 0 0-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.52.4 1.08.73 1.69.98l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.61-.25 1.17-.59 1.69-.98l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z" />
-    </svg>
-  );
-}
-
-function IconBell({ className = "" }: { className?: string }) {
-  return (
-    <svg
-      className={`h-5 w-5 ${className}`}
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="2"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden
-    >
-      <path d="M15 17h5l-1.4-1.4A2 2 0 0 1 18 14.2V11a6 6 0 1 0-12 0v3.2a2 2 0 0 1-.6 1.4L4 17h5" />
-      <path d="M9 17a3 3 0 0 0 6 0" />
-    </svg>
-  );
-}
-
-function IconCheck({ className = "" }: { className?: string }) {
-  return (
-    <svg
-      className={`h-4 w-4 ${className}`}
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="2"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden
-    >
-      <path d="M20 6 9 17l-5-5" />
-    </svg>
-  );
-}
-
 function IconRefresh({ className = "" }: { className?: string }) {
   return (
     <svg
@@ -145,11 +99,121 @@ function IconRefresh({ className = "" }: { className?: string }) {
   );
 }
 
-function extractRoleFromNotificationMessage(message: string): string {
-  const pipeMatch = message.match(/\|\s*([^|]+?)\s+submitted/i);
-  if (pipeMatch?.[1]) return pipeMatch[1].trim();
-  const roleWordMatch = message.match(/\b(HR|Manager|Employee|Emp|Admin|Finance)\b/i);
-  return roleWordMatch?.[1] ? roleWordMatch[1].trim() : "—";
+const ONBOARDING_INVITE_PREVIEW_LIMIT = 6;
+
+function employeeRowStatusUpper(row: Record<string, unknown>): string {
+  return String(row.status ?? row.user_status ?? row.userStatus ?? "").trim().toUpperCase();
+}
+
+function employeeRowRecencyMs(row: Record<string, unknown>): number {
+  const candidates: unknown[] = [
+    row.updated_at,
+    row.updatedAt,
+    row.created_at,
+    row.createdAt,
+    row.doj,
+    row.doi,
+    row.joining_date,
+    row.joiningDate,
+    row.id,
+  ];
+  for (const v of candidates) {
+    if (v == null) continue;
+    if (typeof v === "number" && Number.isFinite(v)) {
+      return v > 1e12 ? v : v * 1000;
+    }
+    const s = String(v).trim();
+    if (/^\d+$/.test(s)) {
+      const n = Number(s);
+      if (Number.isFinite(n)) {
+        return n > 1e12 ? n : n * 1000;
+      }
+    }
+    const t = Date.parse(s);
+    if (!Number.isNaN(t)) {
+      return t;
+    }
+  }
+  return 0;
+}
+
+function pickRecentInviteEmployees(
+  rows: Array<Record<string, unknown>>,
+  limit: number
+): Array<Record<string, unknown>> {
+  const inviteOnly = rows.filter((row) => {
+    const s = employeeRowStatusUpper(row);
+    return s === "INVITE" || s === "INVITED";
+  });
+  inviteOnly.sort((a, b) => employeeRowRecencyMs(b) - employeeRowRecencyMs(a));
+  return inviteOnly.slice(0, limit);
+}
+
+function allocationAccManagerCell(row: Record<string, unknown>): string {
+  const v =
+    row.acc_manager ??
+    row.accManager ??
+    row.account_manager ??
+    row.accountManager ??
+    row.account_mgr ??
+    row.accountMgr;
+  const s = String(v ?? "").trim();
+  return s || "—";
+}
+
+/** Letters, spaces, common punctuation; 2–120 chars */
+function isValidPersonName(name: string): boolean {
+  const t = name.trim();
+  if (t.length < 2 || t.length > 120) return false;
+  return /^[a-zA-ZÀ-ÿ][a-zA-ZÀ-ÿ\s.'-]*$/u.test(t);
+}
+
+/** India mobile: optional +91, then 10 digits starting 6–9 */
+function isValidIndiaMobile(phone: string): boolean {
+  const d = phone.replace(/[\s-]/g, "");
+  if (!d) return false;
+  return /^(\+91)?[6-9]\d{9}$/.test(d);
+}
+
+function generateAutomaticProjectCode(): string {
+  const part = `${Date.now()}`.slice(-6);
+  return `P00${part}`;
+}
+
+/** Designations that use allocated hours 1–8 (others use 4 or 8 only). */
+function designationAllowsFlexibleHours(designation: string): boolean {
+  const r = designation.trim().toLowerCase();
+  if (!r) return false;
+  return (
+    r.includes("design") ||
+    r.includes("devops") ||
+    r.includes("project manager") ||
+    r.includes("delivery manager") ||
+    /\bpm\b/.test(r) ||
+    /\bdm\b/.test(r) ||
+    r.includes("chief") ||
+    r.includes("ceo") ||
+    r.includes("cto") ||
+    r.includes("cfo") ||
+    r.includes("coo") ||
+    r.includes("c-suite") ||
+    r.includes("csuite") ||
+    r.includes("c suite") ||
+    r.includes("chair")
+  );
+}
+
+const FLEXIBLE_ALLOCATION_HOUR_OPTIONS = ["1", "2", "3", "4", "5", "6", "7", "8"] as const;
+const RESTRICTED_ALLOCATION_HOUR_OPTIONS = ["4", "8"] as const;
+
+/** Full-time day = 8h → percentage of capacity (for display). */
+function formatAllocatedHoursPercentLabel(hoursRaw: unknown): string {
+  const raw = String(hoursRaw ?? "").trim();
+  if (!raw || raw === "—") return "—";
+  const n = Number.parseFloat(raw.replace(/[^\d.-]/g, ""));
+  if (!Number.isFinite(n) || n <= 0) return raw;
+  const pct = Math.min(100, Math.round((n / 8) * 100));
+  return `${pct}% (${n}h)`;
 }
 
 function DashboardPageContent() {
@@ -177,7 +241,7 @@ function DashboardPageContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const { metrics, loading, refresh } = useOverviewData();
-  const [activeTab, setActiveTab] = useState("overview");
+  const { activeTab, setActiveTab, goToTab, setReportsExpanded } = useDashboardNav();
   const [theme, setTheme] = useState<"light" | "dark" | "system">(() => {
     if (typeof window === "undefined") return "light";
     const stored = window.localStorage.getItem("wt-theme");
@@ -186,33 +250,41 @@ function DashboardPageContent() {
   });
   const [toast, setToast] = useState<{ type: "success" | "error"; message: string } | null>(null);
   const [actionLoading, setActionLoading] = useState(false);
-  const [empId, setEmpId] = useState("");
   const [employeeProfile, setEmployeeProfile] = useState<Record<string, unknown> | null>(null);
-  const [onboardedUsers, setOnboardedUsers] = useState<Array<Record<string, unknown>>>([]);
+  const [inviteOnboardingRows, setInviteOnboardingRows] = useState<Array<Record<string, unknown>>>([]);
   const [allocations, setAllocations] = useState<Array<Record<string, unknown>>>([]);
   const [allocationForecastRows, setAllocationForecastRows] = useState<Array<Record<string, unknown>>>([]);
   const allocationRecordsRef = useRef<HTMLDivElement>(null);
   const projectCrudFormRef = useRef<HTMLDivElement>(null);
   const allocationFormRef = useRef<HTMLDivElement>(null);
   const [allocationRoles, setAllocationRoles] = useState<string[]>([]);
-  const [allocationUsers, setAllocationUsers] = useState<Array<{ name: string; email: string }>>([]);
-  const [allocationProjects, setAllocationProjects] = useState<Array<{ code: string; name: string }>>([]);
+  const [allocationUsers, setAllocationUsers] = useState<
+    Array<{ name: string; email: string; role?: string }>
+  >([]);
+  const [allocationProjects, setAllocationProjects] = useState<
+    Array<{ code: string; name: string; project_type?: string }>
+  >([]);
+  const [allocationEmployeePickerOpen, setAllocationEmployeePickerOpen] = useState(false);
+  const [allocationEmployeePickerQuery, setAllocationEmployeePickerQuery] = useState("");
+  const allocationEmployeeComboboxRef = useRef<HTMLDivElement>(null);
+  const [allocationListMissingEndDateOnly, setAllocationListMissingEndDateOnly] = useState(false);
   const [projects, setProjects] = useState<Array<Record<string, unknown>>>([]);
   const [assignedProjects, setAssignedProjects] = useState<Array<Record<string, unknown>>>([]);
   const [timelogs, setTimelogs] = useState<Array<Record<string, unknown>>>([]);
   const [managerEmailsForHr, setManagerEmailsForHr] = useState<string[]>([]);
   const [timelogProjects, setTimelogProjects] = useState<Array<{ code: string; name: string }>>([]);
+  const [hrTimelogDirectoryEmails, setHrTimelogDirectoryEmails] = useState<string[]>([]);
   const [timelogForm, setTimelogForm] = useState({
     project_code: "",
     log_date: "",
     hours: "1",
     description: "",
+    /** HR/Admin: optional — submit timelog for this employee when the API accepts it */
+    subject_employee_email: "",
   });
   const [myLeaveRequests, setMyLeaveRequests] = useState<Array<Record<string, unknown>>>([]);
   const [employeeRequests, setEmployeeRequests] = useState<Array<Record<string, unknown>>>([]);
-  const [notifications, setNotifications] = useState<Array<Record<string, unknown>>>([]);
   const [kpis, setKpis] = useState<Array<Record<string, unknown>>>([]);
-  const [reportsExpanded, setReportsExpanded] = useState(false);
   const [headcountBreakdown, setHeadcountBreakdown] = useState<Array<Record<string, unknown>>>([]);
   const [roleBillingRows, setRoleBillingRows] = useState<Array<Record<string, unknown>>>([]);
   const [experienceBandRows, setExperienceBandRows] = useState<Array<Record<string, unknown>>>([]);
@@ -226,6 +298,7 @@ function DashboardPageContent() {
   const [bgvDashboardRows, setBgvDashboardRows] = useState<Array<Record<string, unknown>>>([]);
   const [offboardingForm, setOffboardingForm] = useState({
     emp_id: "",
+    resignation_date: "",
     last_working_day: "",
     separation_type: "VOLUNTARY" as "VOLUNTARY" | "INVOLUNTARY",
     reason: "",
@@ -327,6 +400,8 @@ function DashboardPageContent() {
   const [onboardDepartments, setOnboardDepartments] = useState<string[]>([]);
   const [bandDeptRoleMap, setBandDeptRoleMap] = useState<Record<string, string[]>>({});
   const [selfOnboardForm, setSelfOnboardForm] = useState({
+    full_name: "",
+    phone_number: "",
     yoe: "",
     primary_skills: "",
     secondary_skill: "",
@@ -372,9 +447,10 @@ function DashboardPageContent() {
   }, [selfProfileForm.yoe]);
   const [isSelfOnboarded, setIsSelfOnboarded] = useState<boolean>(user?.status === "ACTIVE");
   const [projectForm, setProjectForm] = useState({
-    project_code: "",
     project_name: "",
-    project_type: "IN_HOUSE",
+    project_type: "IN_HOUSE" as "IN_HOUSE" | "STAFFING" | "PRODUCT",
+    client_name: "",
+    account_manager: "",
   });
   const [editingProjectCode, setEditingProjectCode] = useState<string>("");
   const [projectFilters, setProjectFilters] = useState({
@@ -398,68 +474,15 @@ function DashboardPageContent() {
     start_date: "",
     end_date: "",
     allocation_type: "DEPLOYABLE",
-    billing_status: "BILLED",
+    billing_status: "BILLED" as "BILLED" | "BUFFER" | "INVESTMENT",
     is_manager: false,
   });
   const [editingAllocationId, setEditingAllocationId] = useState<string>("");
-  const [learningTrainings, setLearningTrainings] = useState<Array<Record<string, unknown>>>([]);
-  /** Same rows as `learningTrainings` but updated synchronously after each fetch (avoids stale closure in roster load). */
-  const learningTrainingsLatestRef = useRef<Array<Record<string, unknown>>>([]);
-  const [learningOpenTrainings, setLearningOpenTrainings] = useState<Array<Record<string, unknown>>>([]);
-  const [learningSessions, setLearningSessions] = useState<Array<Record<string, unknown>>>([]);
-  const [learningMaterials, setLearningMaterials] = useState<Array<Record<string, unknown>>>([]);
-  const [learningAssessments, setLearningAssessments] = useState<Array<Record<string, unknown>>>([]);
-  const [learningAttendanceRows, setLearningAttendanceRows] = useState<Array<Record<string, unknown>>>([]);
-  const [learningScores, setLearningScores] = useState<Array<Record<string, unknown>>>([]);
-  const [learningAnalytics, setLearningAnalytics] = useState<Record<string, unknown> | null>(null);
-  const [selectedLearningTrainingId, setSelectedLearningTrainingId] = useState("");
-  const [selectedLearningSessionId, setSelectedLearningSessionId] = useState("");
-  const [learningTrainingForm, setLearningTrainingForm] = useState({
-    name: "",
-    category: "TECHNICAL",
-    type: "OPTIONAL",
-    description: "",
-    duration_days: "1",
-    status: "DRAFT",
-  });
-  /** Set when creating a training; assigned via API right after create. */
-  const [learningCreateTrainerId, setLearningCreateTrainerId] = useState("");
-  const [learningTrainerOptions, setLearningTrainerOptions] = useState<Array<{ id: string; label: string }>>([]);
-  const [selectedLearningTrainerId, setSelectedLearningTrainerId] = useState("");
-  const [selectedLearningParticipantId, setSelectedLearningParticipantId] = useState("");
-  const [selectedLearningApiParticipantId, setSelectedLearningApiParticipantId] = useState("");
-  const [learningRosterTrainerRows, setLearningRosterTrainerRows] = useState<Array<Record<string, unknown>>>([]);
-  const [learningRosterParticipantRows, setLearningRosterParticipantRows] = useState<
-    Array<Record<string, unknown>>
-  >([]);
-  const [learningSessionForm, setLearningSessionForm] = useState({
-    session_date: "",
-    start_time: "",
-    end_time: "",
-    mode: "ONLINE",
-    venue: "",
-    meeting_link: "",
-  });
-  const [learningMaterialForm, setLearningMaterialForm] = useState({
-    title: "",
-    visibility: "EMPLOYEE",
-  });
-  const [learningMaterialFile, setLearningMaterialFile] = useState<File | null>(null);
-  const [learningAssessmentForm, setLearningAssessmentForm] = useState({
-    name: "",
-    description: "",
-    weight_percent: "10",
-  });
-  const [learningAssessmentFile, setLearningAssessmentFile] = useState<File | null>(null);
-  const [learningAttendanceForm, setLearningAttendanceForm] = useState({
-    user_id: "",
-    attendance_status: "PRESENT",
-  });
-  const [learningScoreForm, setLearningScoreForm] = useState({
-    user_id: "",
-    score_percent: "0",
-    mark_completed: true,
-  });
+  const [allocationHrSubTab, setAllocationHrSubTab] = useState<"project" | "allocate" | "list">(
+    "project"
+  );
+  const [timelogSubTab, setTimelogSubTab] = useState<"my" | "team">("my");
+  const [leaveSubTab, setLeaveSubTab] = useState<"my" | "team">("my");
   const userRoles = user?.roles ?? [];
   const hasHrAccess = userRoles.includes("ROLE_HR") || userRoles.includes("ROLE_ADMIN");
   const hasManagerAccess = userRoles.includes("ROLE_MANAGER");
@@ -471,6 +494,34 @@ function DashboardPageContent() {
   /** Self-service profile + onboarding (non-HR employees only) */
   const employeeSelfServeProfile = isEmployee && !hasHrAccess;
   const canAccessProfile = Boolean(user);
+
+  useEffect(() => {
+    if (activeTab === "team-timelog") {
+      setTimelogSubTab("team");
+      setActiveTab("timelog");
+      router.replace("/dashboard?tab=timelog", { scroll: false });
+      return;
+    }
+    if (activeTab === "employee-request") {
+      setLeaveSubTab("team");
+      setActiveTab("leave");
+      router.replace("/dashboard?tab=leave", { scroll: false });
+    }
+  }, [activeTab, setActiveTab, router]);
+
+  useEffect(() => {
+    if (activeTab !== "timelog") return;
+    if (!hasManagerAccess && !hasHrAccess && timelogSubTab === "team") {
+      setTimelogSubTab("my");
+    }
+  }, [activeTab, hasManagerAccess, hasHrAccess, timelogSubTab]);
+
+  useEffect(() => {
+    if (activeTab !== "leave") return;
+    if (!hasManagerAccess && !hasHrAccess && leaveSubTab === "team") {
+      setLeaveSubTab("my");
+    }
+  }, [activeTab, hasManagerAccess, hasHrAccess, leaveSubTab]);
 
   const loadManagerData = useCallback(
     async (force = false) => {
@@ -505,98 +556,13 @@ function DashboardPageContent() {
     [hasManagerAccess, managerProjects, managerPortfolioRows]
   );
 
-  /** Participants for this training (GET participants + optional name match from onboard list). */
-  const learningParticipantOptionsForAttendanceScores = useMemo(() => {
-    const out: Array<{ id: string; label: string }> = [];
-    const seen = new Set<string>();
-    const labelFromOnboard = (uid: string): string | null => {
-      const u = uid.trim();
-      if (!u) return null;
-      const exact = learningTrainerOptions.find((o) => o.id === u);
-      if (exact) return exact.label;
-      const n = Number(u);
-      if (Number.isFinite(n) && n > 0) {
-        const byNum = learningTrainerOptions.find(
-          (o) => !String(o.id).startsWith("email:") && Number(String(o.id)) === n
-        );
-        if (byNum) return byNum.label;
-      }
-      return null;
-    };
-    for (const row of learningRosterParticipantRows) {
-      const uid = participantRowUserId(row);
-      if (!uid || seen.has(uid)) continue;
-      if (uid.startsWith("email:")) {
-        seen.add(uid);
-        let name = String(
-          row.name ?? row.employee_name ?? row.employeeName ?? row.user_name ?? row.userName ?? ""
-        ).trim();
-        let email = String(
-          row.email ?? row.user_email ?? row.userEmail ?? row.employee_email ?? row.employeeEmail ?? ""
-        ).trim();
-        const nested =
-          (row.user as Record<string, unknown> | undefined) ??
-          (row.employee as Record<string, unknown> | undefined);
-        if (nested && typeof nested === "object") {
-          if (!name) name = String(nested.name ?? nested.full_name ?? nested.fullName ?? "").trim();
-          if (!email) email = String(nested.email ?? nested.user_email ?? nested.userEmail ?? "").trim();
-        }
-        const onboard = labelFromOnboard(uid);
-        const status = String(row.enrollment_status ?? row.enrollmentStatus ?? "").trim();
-        const source = String(row.participant_source ?? row.participantSource ?? "").trim();
-        const emailFromOnboard = onboard?.match(/\(([^)]+)\)/)?.[1]?.trim() ?? "";
-        const emailBracket = email || emailFromOnboard;
-        const label = [
-          name || onboard?.split("(")[0]?.trim() || uid.replace(/^email:/, ""),
-          emailBracket ? `(${emailBracket})` : "",
-          status ? `[${status}]` : "",
-          source ? `[${source}]` : "",
-        ]
-          .filter(Boolean)
-          .join(" ");
-        out.push({ id: uid, label: label || onboard || uid });
-        continue;
-      }
-      const n = Number(uid);
-      if (!Number.isFinite(n) || n <= 0) continue;
-      seen.add(uid);
-      let name = String(
-        row.name ?? row.employee_name ?? row.employeeName ?? row.user_name ?? row.userName ?? ""
-      ).trim();
-      let email = String(
-        row.email ?? row.user_email ?? row.userEmail ?? row.employee_email ?? row.employeeEmail ?? ""
-      ).trim();
-      const nested =
-        (row.user as Record<string, unknown> | undefined) ??
-        (row.employee as Record<string, unknown> | undefined);
-      if (nested && typeof nested === "object") {
-        if (!name) name = String(nested.name ?? nested.full_name ?? nested.fullName ?? "").trim();
-        if (!email) email = String(nested.email ?? nested.user_email ?? nested.userEmail ?? "").trim();
-      }
-      const onboard = labelFromOnboard(uid);
-      const nameFromOnboard = onboard
-        ? onboard.includes("(")
-          ? onboard.slice(0, onboard.indexOf("(")).trim()
-          : onboard
-        : "";
-      const emailFromOnboard =
-        onboard?.match(/\(([^)]+)\)/)?.[1]?.trim() ?? "";
-      const displayName = name || nameFromOnboard || `User ${uid}`;
-      const displayEmail = email || emailFromOnboard;
-      const status = String(row.enrollment_status ?? row.enrollmentStatus ?? "").trim();
-      const source = String(row.participant_source ?? row.participantSource ?? "").trim();
-      const label = [
-        displayName,
-        displayEmail ? `(${displayEmail})` : "",
-        status ? `[${status}]` : "",
-        source ? `[${source}]` : "",
-      ]
-        .filter(Boolean)
-        .join(" ");
-      out.push({ id: uid, label: label || onboard || `User ${uid}` });
-    }
-    return out;
-  }, [learningRosterParticipantRows, learningTrainerOptions]);
+  const loadAllProjectsForHr = useCallback(async () => {
+    const res = await hrmsService.getProjects({ page: "0", size: "500" });
+    const rows = toRows(res.data);
+    if (rows.length) return rows;
+    const fallback = await hrmsService.getAllProjects({});
+    return toRows(fallback.data ?? fallback);
+  }, []);
 
   const priorEmploymentDocsRequired = useMemo(() => {
     const raw = String(selfOnboardForm.yoe ?? "").trim().replace(",", ".");
@@ -807,10 +773,15 @@ function DashboardPageContent() {
                 .map((row) => {
                   const email = String(row.email ?? "").trim();
                   const name = String(row.name ?? email).trim();
+                  const role = String(
+                    row.role ?? row.designation ?? row.designation_name ?? row.designationName ?? ""
+                  ).trim();
                   if (!email) return null;
-                  return [email.toLowerCase(), { name, email }] as const;
+                  return [email.toLowerCase(), { name, email, ...(role ? { role } : {}) }] as const;
                 })
-                .filter((x): x is readonly [string, { name: string; email: string }] => Boolean(x))
+                .filter(
+                  (x): x is readonly [string, { name: string; email: string; role?: string }] => Boolean(x)
+                )
             ).values()
           );
           setAllocationUsers(users);
@@ -826,9 +797,15 @@ function DashboardPageContent() {
                   const code = String(row.project_code ?? row.projectCode ?? "").trim();
                   const name = String(row.project_name ?? row.projectName ?? code).trim();
                   if (!code) return null;
-                  return [code, { code, name }] as const;
+                  const project_type = String(row.project_type ?? row.projectType ?? "").trim();
+                  return [code, { code, name, project_type }] as [
+                    string,
+                    { code: string; name: string; project_type: string },
+                  ];
                 })
-                .filter((x): x is readonly [string, { code: string; name: string }] => Boolean(x))
+                .filter(
+                  (x): x is [string, { code: string; name: string; project_type: string }] => x != null
+                )
             ).values()
           ).sort((a, b) => a.name.localeCompare(b.name));
           setAllocationProjects(projects);
@@ -859,21 +836,6 @@ function DashboardPageContent() {
   }, [activeTab, user?.roles]);
 
   useEffect(() => {
-    if (activeTab !== "employee") return;
-    if (!hasHrAccess) return;
-    const id = window.setTimeout(() => {
-      void (async () => {
-        try {
-          const res = await hrmsService.getOnboardList({ page: "0", size: "10" });
-          setOnboardedUsers(toPagedRows(res.data));
-        } catch {
-          setOnboardedUsers([]);
-        }
-      })();
-    }, 0);
-    return () => window.clearTimeout(id);
-  }, [activeTab, hasHrAccess]);
-  useEffect(() => {
     if (activeTab !== "masters") return;
     if (!(userRoles.includes("ROLE_ADMIN") || userRoles.includes("ROLE_HR"))) return;
     const id = window.setTimeout(() => {
@@ -903,7 +865,8 @@ function DashboardPageContent() {
   }, [activeTab, userRoles]);
 
   useEffect(() => {
-    if (activeTab !== "projects") return;
+    if (activeTab !== "overview") return;
+    if (hasManagerAccess) return;
     const id = window.setTimeout(() => {
       void (async () => {
         try {
@@ -922,13 +885,39 @@ function DashboardPageContent() {
       })();
     }, 0);
     return () => window.clearTimeout(id);
-  }, [activeTab]);
+  }, [activeTab, hasManagerAccess]);
   useEffect(() => {
-    if (activeTab !== "timelog" && activeTab !== "team-timelog") return;
+    if (activeTab !== "timelog" || requiresSelfOnboarding) return;
+    if (!hasHrAccess) return;
     const id = window.setTimeout(() => {
       void (async () => {
         try {
-          if (activeTab === "timelog") {
+          const onboardRes = await hrmsService.getOnboardList({ page: "0", size: "200" });
+          const rows = toPagedRows(onboardRes.data ?? onboardRes);
+          const emails = Array.from(
+            new Set(
+              rows
+                .map((row) =>
+                  String(row.email ?? row.user_email ?? row.userEmail ?? "").trim().toLowerCase()
+                )
+                .filter(Boolean)
+            )
+          ).sort();
+          setHrTimelogDirectoryEmails(emails);
+        } catch {
+          setHrTimelogDirectoryEmails([]);
+        }
+      })();
+    }, 0);
+    return () => window.clearTimeout(id);
+  }, [activeTab, hasHrAccess, requiresSelfOnboarding]);
+
+  useEffect(() => {
+    if (activeTab !== "timelog" || requiresSelfOnboarding) return;
+    const id = window.setTimeout(() => {
+      void (async () => {
+        try {
+          if (timelogSubTab === "my") {
             const [_, assignedRes, allocationRes] = await Promise.all([
               loadTimelogsForCurrentRole(),
               hrmsService.getAssignedProjects(),
@@ -936,7 +925,7 @@ function DashboardPageContent() {
             ]);
             const assignedRows = toPagedRows(assignedRes.data ?? assignedRes);
             const allocationRows = toPagedRows(allocationRes.data ?? allocationRes);
-            const projects = Array.from(
+            let projects = Array.from(
               new Map(
                 [...assignedRows, ...allocationRows]
                   .map((row) => {
@@ -950,6 +939,21 @@ function DashboardPageContent() {
                   .filter((entry): entry is readonly [string, { code: string; name: string }] => Boolean(entry))
               ).values()
             ).sort((a, b) => a.name.localeCompare(b.name));
+            if (hasHrAccess && !projects.length) {
+              const all = await loadAllProjectsForHr();
+              projects = Array.from(
+                new Map(
+                  all
+                    .map((row) => {
+                      const code = String(row.project_code ?? row.projectCode ?? "").trim();
+                      const name = String(row.project_name ?? row.projectName ?? code).trim();
+                      if (!code) return null;
+                      return [code.toLowerCase(), { code, name }] as const;
+                    })
+                    .filter((entry): entry is readonly [string, { code: string; name: string }] => Boolean(entry))
+                ).values()
+              ).sort((a, b) => a.name.localeCompare(b.name));
+            }
             setTimelogProjects(projects);
             return;
           }
@@ -957,15 +961,15 @@ function DashboardPageContent() {
         } catch {
           setTimelogs([]);
           setManagerEmailsForHr([]);
-          if (activeTab === "timelog") setTimelogProjects([]);
+          if (timelogSubTab === "my") setTimelogProjects([]);
         }
       })();
     }, 0);
     return () => window.clearTimeout(id);
-  }, [activeTab, hasHrAccess]);
+  }, [activeTab, timelogSubTab, hasHrAccess, requiresSelfOnboarding, loadTimelogsForCurrentRole, loadAllProjectsForHr]);
 
   useEffect(() => {
-    if (activeTab !== "projects" || !hasManagerAccess) return;
+    if (activeTab !== "timelog" || timelogSubTab !== "team" || !hasManagerAccess) return;
     const id = window.setTimeout(() => {
       void (async () => {
         try {
@@ -979,11 +983,11 @@ function DashboardPageContent() {
       })();
     }, 0);
     return () => window.clearTimeout(id);
-  }, [activeTab, hasManagerAccess, loadManagerData]);
+  }, [activeTab, timelogSubTab, hasManagerAccess, loadManagerData]);
 
   useEffect(() => {
     if (!hasManagerAccess) return;
-    if (activeTab !== "projects") return;
+    if (activeTab !== "timelog" || timelogSubTab !== "team") return;
     const code = selectedManagerProjectCode.trim();
     if (!code) {
       setManagerProjectAllocations([]);
@@ -1014,296 +1018,7 @@ function DashboardPageContent() {
       })();
     }, 0);
     return () => window.clearTimeout(id);
-  }, [activeTab, hasManagerAccess, selectedManagerProjectCode]);
-
-  async function loadLearningTrainingsSafe() {
-    const [trainingsRes, openRes, onboardRes, allocRes] = await Promise.allSettled([
-      hrmsService.getTrainings(),
-      hrmsService.getOpenTrainings(),
-      hrmsService.getOnboardList({ page: "0", size: "500" }),
-      hasHrAccess
-        ? hrmsService.getAllocations({ page: "0", size: "500", view: "ALL" })
-        : Promise.resolve({ data: [] }),
-    ]);
-    const trainings =
-      trainingsRes.status === "fulfilled"
-        ? toPagedRows((trainingsRes.value as { data?: unknown }).data ?? trainingsRes.value)
-        : [];
-    learningTrainingsLatestRef.current = trainings;
-    const openTrainings =
-      openRes.status === "fulfilled"
-        ? toPagedRows((openRes.value as { data?: unknown }).data ?? openRes.value)
-        : [];
-    setLearningTrainings(trainings);
-    setLearningOpenTrainings(openTrainings);
-    const onboardRows =
-      onboardRes.status === "fulfilled"
-        ? toPagedRows((onboardRes.value as { data?: unknown }).data ?? onboardRes.value)
-        : [];
-    const allocationRows =
-      allocRes.status === "fulfilled"
-        ? toPagedRows((allocRes.value as { data?: unknown }).data ?? allocRes.value)
-        : [];
-    const mergedOnboardRows = [...onboardRows, ...onboardedUsers, ...allocationRows];
-    const trainerOptions = Array.from(
-      new Map(
-        mergedOnboardRows
-          .map((row) => {
-            const rawId = String(
-              row.user_id ??
-                row.userId ??
-                row.emp_id ??
-                row.empId ??
-                row.id ??
-                (row.user as Record<string, unknown> | undefined)?.id ??
-                ""
-            ).trim();
-            const name = String(row.name ?? "Employee").trim();
-            const email = String(
-              row.email ??
-                row.user_email ??
-                row.userEmail ??
-                row.employee_email ??
-                row.employeeEmail ??
-                ""
-            ).trim();
-            const userId = rawId || (email ? `email:${email.toLowerCase()}` : "");
-            if (!userId) return null;
-            const label = email ? `${name} (${email})` : name;
-            return [userId, { id: userId, label }] as const;
-          })
-          .filter((item): item is readonly [string, { id: string; label: string }] => Boolean(item))
-      ).values()
-    );
-    setLearningTrainerOptions(trainerOptions);
-    if (!selectedLearningTrainerId && trainerOptions.length) {
-      setSelectedLearningTrainerId(trainerOptions[0].id);
-    }
-    // Keep training selector empty by default; user explicitly chooses.
-  }
-
-  async function loadLearningDetailSafe(trainingId: string, sessionId?: string) {
-    if (!trainingId) return;
-    const [sessionsRes, materialsRes, assessmentsRes, analyticsRes] = await Promise.allSettled([
-      hrmsService.getTrainingSessions(trainingId),
-      hrmsService.getTrainingMaterials(trainingId),
-      hrmsService.getAssessments(trainingId),
-      hrmsService.getTrainingAnalytics(trainingId),
-    ]);
-    setLearningSessions(
-      sessionsRes.status === "fulfilled"
-        ? toPagedRows((sessionsRes.value as { data?: unknown }).data ?? sessionsRes.value)
-        : []
-    );
-    setLearningMaterials(
-      materialsRes.status === "fulfilled"
-        ? toPagedRows((materialsRes.value as { data?: unknown }).data ?? materialsRes.value)
-        : []
-    );
-    setLearningAssessments(
-      assessmentsRes.status === "fulfilled"
-        ? toPagedRows((assessmentsRes.value as { data?: unknown }).data ?? assessmentsRes.value)
-        : []
-    );
-    setLearningAnalytics(
-      analyticsRes.status === "fulfilled"
-        ? (((analyticsRes.value as { data?: unknown }).data ?? analyticsRes.value) as Record<string, unknown>)
-        : null
-    );
-    const resolvedSessionId = sessionId || selectedLearningSessionId;
-    if (resolvedSessionId) {
-      try {
-        const attendanceRes = await hrmsService.getAttendance(trainingId, resolvedSessionId);
-        setLearningAttendanceRows(toPagedRows(attendanceRes.data ?? attendanceRes));
-      } catch {
-        setLearningAttendanceRows([]);
-      }
-    }
-  }
-
-  async function resolveLearningTrainerUserId(selectedValue: string): Promise<number> {
-    let idNum = Number(selectedValue);
-    if ((!Number.isFinite(idNum) || idNum <= 0) && selectedValue.startsWith("email:")) {
-      const email = selectedValue.slice("email:".length).trim();
-      if (email) {
-        const userRes = await hrmsService.getUser({ email });
-        const payload = ((userRes as { data?: unknown }).data ?? userRes) as
-          | Record<string, unknown>
-          | null;
-        const nestedUser = (payload?.user as Record<string, unknown> | undefined) ?? null;
-        const candidate = Number(
-          payload?.id ??
-            payload?.user_id ??
-            payload?.userId ??
-            payload?.emp_id ??
-            payload?.empId ??
-            nestedUser?.id ??
-            nestedUser?.user_id ??
-            nestedUser?.userId ??
-            nestedUser?.emp_id ??
-            nestedUser?.empId ??
-            0
-        );
-        if (Number.isFinite(candidate) && candidate > 0) {
-          idNum = candidate;
-        }
-      }
-    }
-    if (!Number.isFinite(idNum) || idNum <= 0) {
-      throw new Error("Please select a valid trainer.");
-    }
-    return idNum;
-  }
-
-  async function loadLearningRosterLists(trainingId: string) {
-    const tid = trainingId.trim();
-    if (!tid) {
-      setLearningRosterTrainerRows([]);
-      setLearningRosterParticipantRows([]);
-      return;
-    }
-    const [tRes, pRes] = await Promise.allSettled([
-      hrmsService.getTrainingTrainers(tid),
-      hrmsService.getTrainingParticipants(tid),
-    ]);
-    setLearningRosterTrainerRows(
-      tRes.status === "fulfilled"
-        ? toPagedRows((tRes.value as { data?: unknown }).data ?? tRes.value)
-        : []
-    );
-    let participantRows =
-      pRes.status === "fulfilled" ? participantListFromApiEnvelope(pRes.value) : [];
-    if (pRes.status === "rejected") {
-      const err = pRes.reason;
-      const message =
-        err instanceof ApiError
-          ? `Participants could not be loaded (${err.status ?? "error"}: ${err.message}).`
-          : "Participants could not be loaded.";
-      setToast({ type: "error", message });
-    }
-    if (!participantRows.length) {
-      try {
-        const detail = await hrmsService.getTrainingById(tid);
-        participantRows = participantListFromApiEnvelope(detail);
-        if (!participantRows.length) {
-          const root = ((detail as { data?: unknown }).data ?? detail) as Record<string, unknown> | null;
-          participantRows = participantListFromTrainingRecord(root);
-        }
-      } catch {
-        /* ignore */
-      }
-    }
-    if (!participantRows.length) {
-      const list =
-        learningTrainingsLatestRef.current.length > 0 ? learningTrainingsLatestRef.current : learningTrainings;
-      const cached = list.find((r) => String(r.id ?? "").trim() === tid);
-      if (cached) participantRows = participantListFromTrainingRecord(cached as Record<string, unknown>);
-    }
-    const normalized = normalizeParticipantRows(participantRows).map((row) => ({
-      ...row,
-      participant_source: String(row.participant_source ?? row.participantSource ?? "").trim(),
-      enrollment_status:
-        row.enrollment_status == null
-          ? null
-          : String(row.enrollment_status ?? row.enrollmentStatus ?? "").trim() || null,
-    }));
-    setLearningRosterParticipantRows(normalized);
-  }
-
-  async function loadLearningParticipantsOnly(trainingId: string) {
-    const tid = trainingId.trim();
-    if (!tid) {
-      setLearningRosterParticipantRows([]);
-      return;
-    }
-    const res = await hrmsService.getTrainingParticipants(tid);
-    const participantRows = participantListFromApiEnvelope(res);
-    const normalized = normalizeParticipantRows(participantRows).map((row) => ({
-      ...row,
-      participant_source: String(row.participant_source ?? row.participantSource ?? "").trim(),
-      enrollment_status:
-        row.enrollment_status == null
-          ? null
-          : String(row.enrollment_status ?? row.enrollmentStatus ?? "").trim() || null,
-    }));
-    setLearningRosterParticipantRows(normalized);
-    if (!selectedLearningApiParticipantId && normalized.length) {
-      setSelectedLearningApiParticipantId(participantRowUserId(normalized[0] ?? {}));
-    }
-  }
-
-  useEffect(() => {
-    if (activeTab !== "learning") return;
-    const id = window.setTimeout(() => {
-      void (async () => {
-        try {
-          await loadLearningTrainingsSafe();
-        } catch {
-          setLearningTrainings([]);
-          setLearningOpenTrainings([]);
-        }
-      })();
-    }, 0);
-    return () => window.clearTimeout(id);
-  }, [activeTab, selectedLearningTrainingId, onboardedUsers]);
-
-  useEffect(() => {
-    if (activeTab !== "learning") return;
-    const trainingId = selectedLearningTrainingId.trim();
-    if (!trainingId) {
-      setLearningSessions([]);
-      setLearningMaterials([]);
-      setLearningAssessments([]);
-      setLearningAnalytics(null);
-      setLearningRosterTrainerRows([]);
-      setLearningRosterParticipantRows([]);
-      setSelectedLearningApiParticipantId("");
-      return;
-    }
-    const id = window.setTimeout(() => {
-      void (async () => {
-        try {
-          await loadLearningTrainingsSafe();
-        } catch {
-          setLearningTrainings([]);
-          setLearningOpenTrainings([]);
-        }
-        try {
-          await loadLearningDetailSafe(trainingId);
-        } catch {
-          setLearningSessions([]);
-          setLearningMaterials([]);
-          setLearningAssessments([]);
-          setLearningAnalytics(null);
-        }
-        try {
-          await loadLearningRosterLists(trainingId);
-        } catch {
-          setLearningRosterTrainerRows([]);
-          setLearningRosterParticipantRows([]);
-        }
-      })();
-    }, 0);
-    return () => window.clearTimeout(id);
-  }, [activeTab, selectedLearningTrainingId, selectedLearningSessionId]);
-
-  useEffect(() => {
-    if (!learningSessions.length) {
-      setSelectedLearningSessionId("");
-      return;
-    }
-    const exists = learningSessions.some(
-      (row) => String(row.id ?? "").trim() === selectedLearningSessionId.trim()
-    );
-    if (!exists) {
-      setSelectedLearningSessionId(String(learningSessions[0]?.id ?? "").trim());
-    }
-  }, [learningSessions, selectedLearningSessionId]);
-
-  useEffect(() => {
-    setLearningAttendanceForm((p) => ({ ...p, user_id: "" }));
-    setLearningScoreForm((p) => ({ ...p, user_id: "" }));
-  }, [selectedLearningTrainingId]);
+  }, [activeTab, timelogSubTab, hasManagerAccess, selectedManagerProjectCode]);
 
   useEffect(() => {
     if (activeTab !== "leave") return;
@@ -1358,265 +1073,6 @@ function DashboardPageContent() {
     } finally {
       setActionLoading(false);
     }
-  }
-
-  function toRows(input: unknown): Array<Record<string, unknown>> {
-    if (Array.isArray(input)) return input as Array<Record<string, unknown>>;
-    if (!input || typeof input !== "object") return [];
-    const o = input as Record<string, unknown>;
-    // Prefer non-empty `allocations` before `data`: some paginated responses include both,
-    // and an empty `data: []` or partial `data` rows would otherwise hide full allocation rows.
-    if (Array.isArray(o.items) && o.items.length) {
-      return o.items as Array<Record<string, unknown>>;
-    }
-    if (Array.isArray(o.allocations) && o.allocations.length) {
-      return o.allocations as Array<Record<string, unknown>>;
-    }
-    if (Array.isArray(o.data) && o.data.length) {
-      return o.data as Array<Record<string, unknown>>;
-    }
-    if (Array.isArray(o.content) && o.content.length) {
-      return o.content as Array<Record<string, unknown>>;
-    }
-    // Extra tolerance for manager/team endpoints that may use custom keys.
-    for (const key of [
-      "rows",
-      "results",
-      "result",
-      "projects",
-      "project_list",
-      "projectList",
-      "manager_projects",
-      "managerProjects",
-      "team",
-      "team_members",
-      "teamMembers",
-    ] as const) {
-      const value = o[key];
-      if (Array.isArray(value) && value.length) {
-        return value as Array<Record<string, unknown>>;
-      }
-    }
-    return [];
-  }
-
-  function toPagedRows(input: unknown): Array<Record<string, unknown>> {
-    const directRows = toRows(input);
-    if (directRows.length) return directRows;
-    if (input && typeof input === "object") {
-      const dataRows = toRows((input as { data?: unknown }).data);
-      if (dataRows.length) return dataRows;
-      const nestedDataRows = toRows((input as { data?: { data?: unknown } }).data?.data);
-      if (nestedDataRows.length) return nestedDataRows;
-      const contentRows = toRows((input as { content?: unknown }).content);
-      if (contentRows.length) return contentRows;
-    }
-    return [];
-  }
-
-  /** Last-resort: find first array of plain objects nested in arbitrary API shapes. */
-  function extractFirstObjectArray(input: unknown, depth = 0): Array<Record<string, unknown>> {
-    if (depth > 8) return [];
-    if (Array.isArray(input)) {
-      if (
-        input.length &&
-        input.every((x) => x !== null && typeof x === "object" && !Array.isArray(x))
-      ) {
-        return input as Array<Record<string, unknown>>;
-      }
-      for (const item of input) {
-        const inner = extractFirstObjectArray(item, depth + 1);
-        if (inner.length) return inner;
-      }
-      return [];
-    }
-    if (input !== null && typeof input === "object") {
-      for (const v of Object.values(input as Record<string, unknown>)) {
-        const inner = extractFirstObjectArray(v, depth + 1);
-        if (inner.length) return inner;
-      }
-    }
-    return [];
-  }
-
-  function rowLooksLikeTrainingParticipant(row: Record<string, unknown>): boolean {
-    if (
-      row.session_date != null ||
-      row.sessionDate != null ||
-      row.start_time != null ||
-      row.startTime != null
-    ) {
-      return false;
-    }
-    return (
-      row.user_id != null ||
-      row.userId != null ||
-      row.participant_user_id != null ||
-      row.participantUserId != null ||
-      row.enrollment_status != null ||
-      row.enrollmentStatus != null ||
-      row.participant != null ||
-      row.trainingParticipant != null ||
-      row.email != null ||
-      row.user_email != null ||
-      row.userEmail != null ||
-      Boolean(row.user && typeof row.user === "object") ||
-      Boolean(row.employee && typeof row.employee === "object")
-    );
-  }
-
-  /** Unwrap GET /trainings/:id/participants payloads that may nest arrays under custom keys. */
-  function participantListFromApiEnvelope(res: unknown): Array<Record<string, unknown>> {
-    const rows = toPagedRows((res as { data?: unknown })?.data ?? res);
-    if (rows.length) return rows;
-    let payload: unknown = (res as { data?: unknown })?.data ?? res;
-    if (typeof payload === "string") {
-      try {
-        payload = JSON.parse(payload) as unknown;
-        const fromString = participantListFromApiEnvelope({ data: payload });
-        if (fromString.length) return fromString;
-      } catch {
-        return [];
-      }
-    }
-    if (payload !== null && typeof payload === "object" && !Array.isArray(payload)) {
-      const o = payload as Record<string, unknown>;
-      for (const key of [
-        "participants",
-        "training_participants",
-        "trainingParticipants",
-        "participantList",
-        "participant_list",
-        "records",
-        "elements",
-        "values",
-        "enrolled_users",
-        "enrolledUsers",
-        "result",
-        "body",
-      ] as const) {
-        const arr = o[key];
-        if (Array.isArray(arr) && arr.length) return arr as Array<Record<string, unknown>>;
-      }
-      const embedded = o._embedded;
-      if (embedded && typeof embedded === "object" && !Array.isArray(embedded)) {
-        for (const v of Object.values(embedded as Record<string, unknown>)) {
-          if (Array.isArray(v) && v.length && v.every((x) => x && typeof x === "object" && !Array.isArray(x))) {
-            return v as Array<Record<string, unknown>>;
-          }
-        }
-      }
-      const extracted = extractFirstObjectArray(payload);
-      if (extracted.length && extracted.some(rowLooksLikeTrainingParticipant)) return extracted;
-    }
-    if (Array.isArray(res)) return res as Array<Record<string, unknown>>;
-    return [];
-  }
-
-  function normalizeParticipantRows(rows: Array<Record<string, unknown>>): Array<Record<string, unknown>> {
-    return rows.map((r) => {
-      const inner =
-        (r.participant as Record<string, unknown> | undefined) ??
-        (r.participantDto as Record<string, unknown> | undefined) ??
-        (r.participant_dto as Record<string, unknown> | undefined) ??
-        (r.trainingParticipant as Record<string, unknown> | undefined) ??
-        (r.training_participant as Record<string, unknown> | undefined);
-      if (inner && typeof inner === "object") {
-        const hasUserRef =
-          inner.user_id != null ||
-          inner.userId != null ||
-          inner.participant_user_id != null ||
-          inner.employee_id != null ||
-          inner.employeeId != null ||
-          inner.emp_id != null ||
-          inner.empId != null ||
-          inner.id != null;
-        if (hasUserRef) return { ...r, ...inner };
-      }
-      return r;
-    });
-  }
-
-  function participantListFromTrainingRecord(
-    training: Record<string, unknown> | null
-  ): Array<Record<string, unknown>> {
-    if (!training) return [];
-    const candidates: Array<Record<string, unknown>> = [training];
-    for (const wrap of ["training", "payload", "result", "body", "record", "data"] as const) {
-      const inner = training[wrap];
-      if (inner && typeof inner === "object" && !Array.isArray(inner)) {
-        candidates.push(inner as Record<string, unknown>);
-      }
-    }
-    for (const c of candidates) {
-      for (const key of [
-        "participants",
-        "training_participants",
-        "trainingParticipants",
-        "participantList",
-        "participant_list",
-        "enrolled_users",
-        "enrolledUsers",
-        "employee_list",
-        "employeeList",
-        "roster",
-        "attendees",
-      ] as const) {
-        const v = c[key];
-        if (Array.isArray(v) && v.length) return v as Array<Record<string, unknown>>;
-      }
-    }
-    return [];
-  }
-
-  function participantRowUserId(row: Record<string, unknown>): string {
-    const nested =
-      (row.user as Record<string, unknown> | undefined) ??
-      (row.employee as Record<string, unknown> | undefined) ??
-      (row.participant_user as Record<string, unknown> | undefined) ??
-      (row.participantUser as Record<string, unknown> | undefined) ??
-      (row.user_info as Record<string, unknown> | undefined);
-    if (nested && typeof nested === "object") {
-      const nid = String(
-        nested.user_id ?? nested.userId ?? nested.id ?? nested.emp_id ?? nested.empId ?? ""
-      ).trim();
-      const n = Number(nid);
-      if (nid && Number.isFinite(n) && n > 0) return nid;
-    }
-    const direct = String(
-      row.user_id ??
-        row.userId ??
-        row.participant_user_id ??
-        row.participantUserId ??
-        row.member_user_id ??
-        row.memberUserId ??
-        row.employee_id ??
-        row.employeeId ??
-        row.emp_id ??
-        row.empId ??
-        ""
-    ).trim();
-    const d = Number(direct);
-    if (direct && Number.isFinite(d) && d > 0) return direct;
-    const emailRaw = String(
-      row.email ??
-        row.user_email ??
-        row.userEmail ??
-        row.employee_email ??
-        row.employeeEmail ??
-        (nested && typeof nested === "object"
-          ? String(
-              (nested as Record<string, unknown>).email ??
-                (nested as Record<string, unknown>).user_email ??
-                (nested as Record<string, unknown>).userEmail ??
-                ""
-            )
-          : "")
-    )
-      .trim()
-      .toLowerCase();
-    if (emailRaw) return `email:${emailRaw}`;
-    return "";
   }
 
   function buildUserIdToNameMap(users: Array<Record<string, unknown>>) {
@@ -1997,7 +1453,9 @@ function DashboardPageContent() {
             employee: String(emp.name ?? emp.employee_name ?? emp.employeeName ?? "—").trim() || "—",
             email: String(emp.email ?? emp.user_email ?? emp.userEmail ?? "—").trim() || "—",
             role: String(emp.project_role ?? emp.role ?? emp.designation ?? "—").trim() || "—",
-            allocated_hours: String(emp.allocated_hours ?? emp.allocatedHours ?? row.allocated_hours ?? "—").trim(),
+            allocated_hours: formatAllocatedHoursPercentLabel(
+              emp.allocated_hours ?? emp.allocatedHours ?? row.allocated_hours
+            ),
             allocation_type: String(emp.allocation_type ?? emp.allocationType ?? row.allocation_type ?? "—").trim(),
             is_manager: String(emp.is_manager ?? emp.isManager ?? row.is_manager ?? "—").trim(),
             start_date: String(emp.start_date ?? emp.startDate ?? row.start_date ?? "—").trim(),
@@ -2011,7 +1469,9 @@ function DashboardPageContent() {
           employee: employeeFromRow || "—",
           email: emailFromRow || "—",
           role: roleFromRow || "—",
-          allocated_hours: String(row.allocated_hours ?? row.allocatedHours ?? row.hours ?? "—").trim(),
+          allocated_hours: formatAllocatedHoursPercentLabel(
+            row.allocated_hours ?? row.allocatedHours ?? row.hours
+          ),
           allocation_type: String(row.allocation_type ?? row.allocationType ?? "—").trim(),
           is_manager: String(row.is_manager ?? row.isManager ?? "—").trim(),
           start_date: String(row.start_date ?? row.startDate ?? "—").trim(),
@@ -2021,40 +1481,156 @@ function DashboardPageContent() {
       .filter((row) => row.employee !== "—" || row.email !== "—");
   }
 
-  const navigation = useMemo(
-    () => [
-      { id: "overview", label: "Overview", roles: ["ROLE_MANAGER", "ROLE_HR", "ROLE_ADMIN", "ROLE_FINANCE"] },
-      { id: "employee", label: "Employee & Onboarding", roles: ["ROLE_EMPLOYEE", "ROLE_HR", "ROLE_ADMIN"] },
-      { id: "allocation", label: "Allocation & Projects", roles: ["ROLE_HR", "ROLE_ADMIN"] },
-      { id: "projects", label: "Projects", roles: ["ROLE_EMPLOYEE", "ROLE_MANAGER", "ROLE_HR", "ROLE_ADMIN"] },
-      { id: "allocation-extension", label: "Allocation Extensions", roles: ["ROLE_MANAGER", "ROLE_HR", "ROLE_ADMIN"] },
-      { id: "employee-request", label: "Team Requests", roles: ["ROLE_MANAGER", "ROLE_HR", "ROLE_ADMIN"] },
-      { id: "offboarding", label: "Offboarding", roles: ["ROLE_HR"] },
-      { id: "background-verification", label: "Background Verification", roles: ["ROLE_HR"] },
-      { id: "timelog", label: "Timelog", roles: ["ROLE_EMPLOYEE", "ROLE_MANAGER", "ROLE_HR", "ROLE_ADMIN"] },
-      { id: "team-timelog", label: "Team Timelogs", roles: ["ROLE_MANAGER", "ROLE_HR", "ROLE_ADMIN"] },
-      { id: "leave", label: "Leave Requests", roles: ["ROLE_EMPLOYEE", "ROLE_MANAGER", "ROLE_HR", "ROLE_ADMIN"] },
-      { id: "learning", label: "Learning & Development", roles: ["ROLE_EMPLOYEE", "ROLE_MANAGER", "ROLE_HR", "ROLE_ADMIN"] },
-      {
-        id: "reports",
-        label: "Reports",
-        roles: ["ROLE_HR", "ROLE_ADMIN"],
-        children: [
-          { id: "reports-workforce", label: "Workforce Overview" },
-          { id: "reports-section-2", label: "Utilization vs Effort" },
-          { id: "reports-section-3", label: "Attrition & Retention" },
-          { id: "reports-section-4", label: "Skill & Capacity Report" },
-          { id: "reports-section-5", label: "Engagement & Culture Metrics" },
-          { id: "reports-section-6", label: "Compliance & Risk Support Report" },
-          { id: "reports-section-7", label: "BGV Report Dashboard" },
-        ],
-      },
-      { id: "uploads", label: "Uploads", roles: ["ROLE_HR", "ROLE_ADMIN"] },
-      { id: "masters", label: "Masters & Admin", roles: ["ROLE_HR", "ROLE_ADMIN"] },
-    ],
-    []
-  );
   const availableOnboardRoles = bandDeptRoleMap[onboardForm.department] ?? [];
+  const internBandId = useMemo(() => {
+    const hit = onboardBands.find((row) => {
+      const n = String(row.name ?? row.id ?? "").trim().toUpperCase();
+      return n === "B8" || n.startsWith("B8") || n.includes("B8");
+    });
+    const id = hit?.id != null ? Number(hit.id) : NaN;
+    return Number.isFinite(id) && id > 0 ? id : 8;
+  }, [onboardBands]);
+  const defaultConsultantBandId = useMemo(() => {
+    const first = onboardBands[0];
+    const id = first?.id != null ? Number(first.id) : NaN;
+    return Number.isFinite(id) && id > 0 ? id : 1;
+  }, [onboardBands]);
+  const allocationEmployeesPickerFiltered = useMemo(() => {
+    const q = allocationEmployeePickerQuery.trim().toLowerCase();
+    if (!q) return allocationUsers;
+    return allocationUsers.filter(
+      (u) =>
+        u.name.toLowerCase().includes(q) ||
+        u.email.toLowerCase().includes(q) ||
+        Boolean(u.role && u.role.toLowerCase().includes(q))
+    );
+  }, [allocationUsers, allocationEmployeePickerQuery]);
+  const allocationEmployeeSelectLabel = useMemo(() => {
+    const email = allocationForm.employee_email.trim().toLowerCase();
+    if (!email) return "Select employee";
+    const hit = allocationUsers.find((u) => u.email.toLowerCase() === email);
+    if (!hit) return allocationForm.employee_email.trim();
+    return hit.role
+      ? `${hit.name} | ${hit.role} (${hit.email})`
+      : `${hit.name} (${hit.email})`;
+  }, [allocationUsers, allocationForm.employee_email]);
+  const allocationsForListView = useMemo(() => {
+    if (!allocationListMissingEndDateOnly) return allocations;
+    return allocations.filter((row) => !String(row.end_date ?? row.endDate ?? "").trim());
+  }, [allocations, allocationListMissingEndDateOnly]);
+  const assignedProjectsWithAllocationPct = useMemo(
+    () =>
+      assignedProjects.map((row) => ({
+        ...row,
+        allocated_hours: formatAllocatedHoursPercentLabel(
+          row.allocated_hours ?? row.allocatedHours ?? row.hours
+        ),
+      })),
+    [assignedProjects]
+  );
+  const investmentBenchRows = useMemo(() => {
+    const fromAlloc = allocations
+      .filter(
+        (r) => String(r.billing_status ?? r.billingStatus ?? "").toUpperCase() === "INVESTMENT"
+      )
+      .map((r) => ({
+        source: "Investment allocation",
+        name: String(r.employee_name ?? "—"),
+        email: String(r.employee_email ?? r.email ?? r.user_email ?? "—"),
+        bench_days: "Investment allocation",
+      }));
+    const fromBench = benchAgingRows.map((r) => ({
+      source: String(r.talent_pool ?? r.source ?? "Bench / talent pool"),
+      name: String(r.name ?? "—"),
+      email: String(r.email ?? "—"),
+      bench_days: String(r.bench_days ?? r.benchDays ?? "—"),
+    }));
+    return [...fromBench, ...fromAlloc];
+  }, [allocations, benchAgingRows]);
+  const utilizationBenchRowsWithInvestment = useMemo(() => {
+    const seen = new Set(
+      benchAgingRows.map((r) => String(r.email ?? "").trim().toLowerCase()).filter(Boolean)
+    );
+    const extras: Array<Record<string, unknown>> = [];
+    for (const row of allocations) {
+      if (String(row.billing_status ?? row.billingStatus ?? "").toUpperCase() !== "INVESTMENT") continue;
+      const email = String(
+        row.employee_email ?? row.email ?? row.user_email ?? row.userEmail ?? ""
+      )
+        .trim()
+        .toLowerCase();
+      if (!email || seen.has(email)) continue;
+      seen.add(email);
+      extras.push({
+        emp_id: String(row.emp_id ?? row.employee_id ?? row.employeeId ?? row.id ?? "—"),
+        email,
+        name: String(row.employee_name ?? row.name ?? "—"),
+        department: String(row.department ?? row.role ?? row.designation ?? "—"),
+        bench_days: "Investment allocation",
+      });
+    }
+    return [...benchAgingRows, ...extras];
+  }, [benchAgingRows, allocations]);
+  useEffect(() => {
+    const code = allocationForm.project_code.trim();
+    if (!code) return;
+    const fromProjects = projects.find(
+      (p) =>
+        String(p.project_code ?? p.projectCode ?? "")
+          .trim()
+          .toLowerCase() === code.toLowerCase()
+    );
+    const fromAllocList = allocationProjects.find((p) => p.code.toLowerCase() === code.toLowerCase());
+    const pt = String(
+      fromProjects?.project_type ??
+        fromProjects?.projectType ??
+        fromAllocList?.project_type ??
+        ""
+    ).toUpperCase();
+    if (pt === "PRODUCT") {
+      setAllocationForm((prev) =>
+        prev.billing_status === "INVESTMENT" ? prev : { ...prev, billing_status: "INVESTMENT" }
+      );
+    }
+  }, [allocationForm.project_code, projects, allocationProjects]);
+
+  useEffect(() => {
+    if (!allocationEmployeePickerOpen) return;
+    const onPointerDown = (e: MouseEvent | PointerEvent) => {
+      const root = allocationEmployeeComboboxRef.current;
+      if (root && !root.contains(e.target as Node)) {
+        setAllocationEmployeePickerOpen(false);
+        setAllocationEmployeePickerQuery("");
+      }
+    };
+    document.addEventListener("pointerdown", onPointerDown);
+    return () => document.removeEventListener("pointerdown", onPointerDown);
+  }, [allocationEmployeePickerOpen]);
+
+  useEffect(() => {
+    const flex = designationAllowsFlexibleHours(allocationForm.role);
+    const hrs = Number(allocationForm.allocated_hours);
+    if (flex) {
+      if (!Number.isFinite(hrs) || hrs < 1 || hrs > 8 || !Number.isInteger(hrs)) {
+        setAllocationForm((p) => ({ ...p, allocated_hours: "8" }));
+      }
+    } else if (hrs !== 4 && hrs !== 8) {
+      setAllocationForm((p) => ({ ...p, allocated_hours: "8" }));
+    }
+  }, [allocationForm.role, allocationForm.allocated_hours]);
+
+  const offboardingNoticeLabel = useMemo(() => {
+    const r = offboardingForm.resignation_date.trim();
+    const l = offboardingForm.last_working_day.trim();
+    if (!r || !l) return null;
+    const a = new Date(r);
+    const b = new Date(l);
+    if (Number.isNaN(a.getTime()) || Number.isNaN(b.getTime()) || b < a) {
+      return "Resignation date must be on or before last working day.";
+    }
+    const days = Math.round((b.getTime() - a.getTime()) / 86400000);
+    return `Notice period (resignation → last working day): ${Math.max(0, days)} calendar day(s).`;
+  }, [offboardingForm.resignation_date, offboardingForm.last_working_day]);
   const normalizeBandValue = (value: unknown) => {
     const raw = String(value ?? "").trim();
     if (!raw) return "";
@@ -2183,6 +1759,34 @@ function DashboardPageContent() {
 
     let timelogRows: Array<Record<string, unknown>> = [];
     if (hasHrAccess) {
+      const normalizedTarget = String(targetEmployeeEmail ?? "")
+        .trim()
+        .toLowerCase();
+      if (normalizedTarget) {
+        try {
+          const focusedRes = await hrmsService.getTimelogs({
+            page: "0",
+            size: "200",
+            view: "ALL",
+            employee_email: normalizedTarget,
+            employeeEmail: normalizedTarget,
+          } as Record<string, string>);
+          const focusedRows = toPagedRows((focusedRes as { data?: unknown }).data ?? focusedRes).filter((row) => {
+            const email = String(
+              row.employee_email ?? row.user_email ?? row.userEmail ?? row.email ?? ""
+            )
+              .trim()
+              .toLowerCase();
+            return email === normalizedTarget;
+          });
+          if (focusedRows.length) {
+            setTimelogs(focusedRows);
+            return focusedRows;
+          }
+        } catch {
+          /* fall through to org-wide load */
+        }
+      }
       try {
         const hrView = await hrmsService.getTimelogs({ page: "0", size: "200", view: "ALL" });
         timelogRows = toPagedRows((hrView as { data?: unknown }).data ?? hrView);
@@ -2494,13 +2098,6 @@ function DashboardPageContent() {
     setTimelogs(normalizedRows);
     return normalizedRows;
   }
-  const loadAllProjectsForHr = useCallback(async () => {
-    const res = await hrmsService.getProjects({ page: "0", size: "10" });
-    const rows = toRows(res.data);
-    if (rows.length) return rows;
-    const fallback = await hrmsService.getAllProjects({});
-    return toRows(fallback.data ?? fallback);
-  }, []);
   async function loadMyLeaveRequests() {
     const email = String((user as { email?: string } | null)?.email ?? "").trim();
     if (!email) {
@@ -2594,7 +2191,7 @@ function DashboardPageContent() {
     let onboardRows: Array<Record<string, unknown>> = [];
     let scopedManagerRows: Array<Record<string, unknown>> = [];
     if (hasHrAccess) {
-      const onboardRes = await hrmsService.getOnboardList({ page: "0", size: "10" });
+      const onboardRes = await hrmsService.getOnboardList({ page: "0", size: "200" });
       onboardRows = toPagedRows(onboardRes.data ?? onboardRes);
     } else if (hasManagerAccess) {
       if (managerPortfolioRows.length) {
@@ -2764,7 +2361,7 @@ function DashboardPageContent() {
     setEmployeeRequests(enriched);
   }, [employeeRequestFilters, hasHrAccess, hasManagerAccess, managerPortfolioRows, loadManagerData]);
   useEffect(() => {
-    if (activeTab !== "leave" && activeTab !== "employee-request") return;
+    if (activeTab !== "leave" || leaveSubTab !== "team") return;
     if (!hasManagerAccess && !hasHrAccess) return;
     const id = window.setTimeout(() => {
       void (async () => {
@@ -2776,7 +2373,7 @@ function DashboardPageContent() {
       })();
     }, 0);
     return () => window.clearTimeout(id);
-  }, [activeTab, hasManagerAccess, hasHrAccess, loadEmployeeRequestsForApprover]);
+  }, [activeTab, leaveSubTab, hasManagerAccess, hasHrAccess, loadEmployeeRequestsForApprover]);
 
   async function updateEmployeeRequestStatus(requestId: string, status: "APPROVED" | "REJECTED") {
     const idNum = Number(requestId);
@@ -2804,6 +2401,12 @@ function DashboardPageContent() {
       });
     }
   }
+  const loadInviteOnboardingPreview = useCallback(async () => {
+    const res = await hrmsService.getOnboardList({ page: "0", size: "200" });
+    const rows = toRows((res as { data?: unknown }).data ?? res);
+    setInviteOnboardingRows(pickRecentInviteEmployees(rows, ONBOARDING_INVITE_PREVIEW_LIMIT));
+  }, []);
+
   const loadAllocationsForHr = useCallback(async () => {
     const res = await hrmsService.getAllocations({ page: "0", size: "200", view: "ALL" });
     const primary = (res as { data?: unknown }).data ?? res;
@@ -2882,6 +2485,29 @@ function DashboardPageContent() {
       })
     );
   }, [loadAllProjectsForHr]);
+
+  useEffect(() => {
+    if (activeTab !== "allocation") return;
+    if (!hasHrAccess) return;
+    if (requiresSelfOnboarding) return;
+    const id = window.setTimeout(() => {
+      void loadAllocationsForHr().catch(() => {
+        setAllocations([]);
+      });
+    }, 0);
+    return () => window.clearTimeout(id);
+  }, [activeTab, hasHrAccess, requiresSelfOnboarding, loadAllocationsForHr]);
+
+  useEffect(() => {
+    if (activeTab !== "employee" || !hasHrAccess) return;
+    const id = window.setTimeout(() => {
+      void loadInviteOnboardingPreview().catch(() => {
+        setInviteOnboardingRows([]);
+      });
+    }, 0);
+    return () => window.clearTimeout(id);
+  }, [activeTab, hasHrAccess, loadInviteOnboardingPreview]);
+
   const filteredProjects = useMemo(() => {
     const search = projectFilters.search.trim().toLowerCase();
     return projects.filter((project) => {
@@ -2924,6 +2550,10 @@ function DashboardPageContent() {
     () => managerTeamEmails(managerPortfolioRows),
     [managerPortfolioRows]
   );
+  const teamTimelogEmployeeOptions = useMemo(() => {
+    if (hasHrAccess && hrTimelogDirectoryEmails.length) return hrTimelogDirectoryEmails;
+    return managerTeamEmailList;
+  }, [hasHrAccess, hrTimelogDirectoryEmails, managerTeamEmailList]);
   const managerTeamTimelogs = useMemo(() => {
     const normalizedFilter = teamTimelogEmailFilter.trim().toLowerCase();
     if (normalizedFilter && normalizedFilter !== "all") {
@@ -2936,6 +2566,9 @@ function DashboardPageContent() {
         return Boolean(email) && email === normalizedFilter;
       });
     }
+    if (hasHrAccess) {
+      return timelogs;
+    }
     if (!managerTeamEmailList.length) return timelogs;
     const teamEmailSet = new Set(managerTeamEmailList);
     return timelogs.filter((row) => {
@@ -2946,68 +2579,29 @@ function DashboardPageContent() {
         .toLowerCase();
       return Boolean(email) && teamEmailSet.has(email);
     });
-  }, [timelogs, managerTeamEmailList, teamTimelogEmailFilter]);
+  }, [timelogs, managerTeamEmailList, teamTimelogEmailFilter, hasHrAccess]);
   useEffect(() => {
     if (teamTimelogEmailFilter === "ALL") return;
-    const exists = managerTeamEmailList.some(
+    const exists = teamTimelogEmployeeOptions.some(
       (email) => email.toLowerCase() === teamTimelogEmailFilter.trim().toLowerCase()
     );
     if (!exists) {
       setTeamTimelogEmailFilter("ALL");
     }
-  }, [managerTeamEmailList, teamTimelogEmailFilter]);
+  }, [teamTimelogEmployeeOptions, teamTimelogEmailFilter]);
   useEffect(() => {
-    if (activeTab !== "team-timelog") return;
+    if (activeTab !== "timelog" || timelogSubTab !== "team") return;
     const selected = teamTimelogEmailFilter.trim();
     if (!selected || selected.toUpperCase() === "ALL") return;
     void loadTimelogsForCurrentRole(selected).catch(() => {
       /* ignore focused refresh errors */
     });
-  }, [activeTab, teamTimelogEmailFilter]);
-  const managerTimelogsForHr = useMemo(() => {
-    if (!hasHrAccess) return timelogs;
-    const managerEmailSet = new Set(managerEmailsForHr);
-    return timelogs.filter((row) => {
-      const managerRaw = row.is_manager;
-      const isManagerFlag =
-        typeof managerRaw === "boolean"
-          ? managerRaw
-          : typeof managerRaw === "number"
-            ? managerRaw === 1
-            : ["true", "yes", "y", "1", "manager"].includes(
-                String(managerRaw ?? "").trim().toLowerCase()
-              );
-      const roleLabel = String(
-        row.role ??
-          row.user_role ??
-          row.userRole ??
-          row.designation ??
-          ""
-      )
-        .trim()
-        .toLowerCase();
-      const email = String(
-        row.employee_email ?? row.user_email ?? row.userEmail ?? row.email ?? ""
-      )
-        .trim()
-        .toLowerCase();
-      return isManagerFlag || roleLabel.includes("manager") || (email && managerEmailSet.has(email));
-    });
-  }, [timelogs, hasHrAccess, managerEmailsForHr]);
+  }, [activeTab, timelogSubTab, teamTimelogEmailFilter]);
   const hrVisibleTimelogs = useMemo(() => {
     if (!hasHrAccess) return timelogs;
-    return managerTimelogsForHr.length ? managerTimelogsForHr : timelogs;
-  }, [hasHrAccess, timelogs, managerTimelogsForHr]);
+    return timelogs;
+  }, [hasHrAccess, timelogs]);
 
-  const unreadNotificationCount = useMemo(
-    () =>
-      notifications.filter((row) => !Boolean(row.is_read ?? row.isRead ?? false)).length,
-    [notifications]
-  );
-  const loadNotifications = useCallback(async () => {
-    const res = await hrmsService.getNotifications({ page: "0", size: "20" });
-    setNotifications(toRows(res.data));
-  }, []);
   // (learning loaders moved above useEffects to avoid TDZ)
   const loadWorkforceOverviewReports = useCallback(async () => {
     const params = {
@@ -3376,11 +2970,10 @@ function DashboardPageContent() {
       setSelectedManagerProjectCode(String(normalizedManagerProjects[0].project_code ?? ""));
     }
   }, [normalizedManagerProjects, selectedManagerProjectCode]);
-  const visibleNavigation = navigation.filter((item) => {
-    if (item.id === "employee" && !hasHrAccess) return false;
-    if (item.id === "team-timelog" && hasHrAccess) return false;
-    return item.roles.length === 0 ? true : item.roles.some((r) => userRoles.includes(r));
-  });
+  const visibleNavigation = useMemo(
+    () => filterVisibleNavigation(dashboardNavigation, userRoles, { hasHrAccess }),
+    [userRoles, hasHrAccess]
+  );
   useEffect(() => {
     if (!hasHrAccess) return;
     if (activeTab.startsWith("reports-")) setReportsExpanded(true);
@@ -3400,16 +2993,24 @@ function DashboardPageContent() {
     setActiveTab(fallbackTab);
   }, [activeTab, visibleNavigation]);
 
-  const goToTab = (id: string) => {
-    setActiveTab(id);
-    router.replace("/dashboard", { scroll: false });
-  };
-
   const renderSelfOnboardingPanel = () => (
     <div className="rounded-2xl border border-wt-border bg-wt-surface-1 p-5">
       <h3 className="font-semibold mb-1">Complete Your Onboarding</h3>
-      <p className="text-sm text-wt-text-muted mb-4">Employees must complete onboarding before full portal access.</p>
+      <p className="text-sm text-wt-text-muted mb-4">
+        Employees must complete onboarding before full portal access. Your legal name and phone here replace what HR
+        entered when you were invited.
+      </p>
       <div className="grid sm:grid-cols-2 gap-3">
+        <InputField
+          label="Full name (as per ID)"
+          value={selfOnboardForm.full_name}
+          onChange={(v) => setSelfOnboardForm((p) => ({ ...p, full_name: v }))}
+        />
+        <InputField
+          label="Phone number"
+          value={selfOnboardForm.phone_number}
+          onChange={(v) => setSelfOnboardForm((p) => ({ ...p, phone_number: v }))}
+        />
         <InputField label="Years of Experience" value={selfOnboardForm.yoe} onChange={(v) => setSelfOnboardForm((p) => ({ ...p, yoe: v }))} />
         <InputField
           label="Primary Skills (comma separated)"
@@ -3473,6 +3074,14 @@ function DashboardPageContent() {
               if (!user?.email) {
                 throw new Error("Unable to resolve logged-in email.");
               }
+              const legalName = selfOnboardForm.full_name.trim();
+              const phone = selfOnboardForm.phone_number.trim();
+              if (!legalName || !isValidPersonName(legalName)) {
+                throw new Error("Enter your full name as per ID (letters and spaces, 2–120 characters).");
+              }
+              if (!phone || !isValidIndiaMobile(phone)) {
+                throw new Error("Enter a valid Indian mobile number (10 digits, optional +91).");
+              }
               const fd = new FormData();
               const primarySkills = selfOnboardForm.primary_skills
                 .split(",")
@@ -3529,6 +3138,8 @@ function DashboardPageContent() {
                 "user_data",
                 JSON.stringify({
                   email: user.email,
+                  name: legalName,
+                  phone_number: phone,
                   yoe: yoeValue,
                   experience: yoeValue && yoeValue > 0 ? `${yoeValue} years` : null,
                   primary_skills: primarySkills,
@@ -3553,6 +3164,8 @@ function DashboardPageContent() {
               });
               await hrmsService.completeMyOnboarding(fd);
               setSelfOnboardForm({
+                full_name: "",
+                phone_number: "",
                 yoe: "",
                 primary_skills: "",
                 secondary_skill: "",
@@ -3801,220 +3414,8 @@ function DashboardPageContent() {
   );
 
   return (
-    <div className="flex min-h-screen flex-col bg-wt-bg text-wt-text lg:flex-row">
-        <aside className="wt-scroll flex max-h-[min(38vh,280px)] shrink-0 flex-col border-b border-wt-border bg-wt-surface-1 p-4 lg:max-h-none lg:min-h-0 lg:w-[250px] lg:shrink-0 lg:border-b-0 lg:border-r lg:p-5">
-          <div className="mb-4 shrink-0">
-            <WebTrakBrand variant="sidebar" />
-          </div>
-          <nav className="min-h-0 flex-1 space-y-1.5 overflow-y-auto">
-            {visibleNavigation.map((item) => {
-              const children = (item as { children?: Array<{ id: string; label: string }> }).children;
-              if (children?.length && item.id === "reports") {
-                return (
-                  <div key={item.id} className="space-y-1">
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setReportsExpanded((prev) => !prev);
-                        if (!activeTab.startsWith("reports-")) {
-                          goToTab("reports-workforce");
-                        }
-                      }}
-                      className={`w-full text-left px-3 py-2 rounded-lg text-sm transition ${
-                        activeTab.startsWith("reports-")
-                          ? "bg-wt-surface-3 text-wt-text"
-                          : "text-wt-text-muted hover:bg-wt-surface-2"
-                      }`}
-                    >
-                      {item.label}
-                    </button>
-                    {reportsExpanded ? (
-                      <div className="ml-2 space-y-1 border-l border-wt-border pl-2">
-                        {children.map((child) => (
-                          <button
-                            key={child.id}
-                            type="button"
-                            onClick={() => goToTab(child.id)}
-                            className={`w-full text-left px-3 py-1.5 rounded-lg text-xs transition ${
-                              activeTab === child.id
-                                ? "bg-wt-surface-3 text-wt-text"
-                                : "text-wt-text-muted hover:bg-wt-surface-2"
-                            }`}
-                          >
-                            {child.label}
-                          </button>
-                        ))}
-                      </div>
-                    ) : null}
-                  </div>
-                );
-              }
-              return (
-                <button
-                  key={item.id}
-                  type="button"
-                  onClick={() => goToTab(item.id)}
-                  className={`w-full text-left px-3 py-2 rounded-lg text-sm transition ${
-                    activeTab === item.id
-                      ? "bg-wt-surface-3 text-wt-text"
-                      : "text-wt-text-muted hover:bg-wt-surface-2"
-                  }`}
-                >
-                  {item.label}
-                </button>
-              );
-            })}
-          </nav>
-          {canAccessProfile ? (
-            <div className="mt-4 shrink-0 border-t border-wt-border pt-4">
-              <Link
-                href="/dashboard?tab=profile"
-                onClick={() => setActiveTab("profile")}
-                className={`flex items-center gap-2 rounded-xl border px-3 py-2.5 text-sm font-medium transition ${
-                  activeTab === "profile"
-                    ? "border-wt-border bg-wt-surface-3 text-wt-text"
-                    : "border-transparent bg-wt-surface-2 text-wt-text-muted hover:bg-wt-surface-3 hover:text-wt-text"
-                }`}
-                aria-label="Profile"
-                title="Profile"
-              >
-                <IconUser className="shrink-0" />
-                Profile
-              </Link>
-            </div>
-          ) : null}
-        </aside>
-
-        <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-          <header className="shrink-0 border-b border-wt-border px-6 py-4 flex items-center justify-between gap-4">
-            <div>
-              <h2 className="text-xl font-semibold">
-                {activeTab === "profile" ? "My profile" : "Dashboard"}
-              </h2>
-              <p className="text-xs text-wt-text-muted">WebTrak workforce workspace</p>
-            </div>
-            <div className="flex items-center gap-2 shrink-0">
-              <details
-                className="group relative"
-                onToggle={(e) => {
-                  const el = e.currentTarget as HTMLDetailsElement;
-                  if (el.open) {
-                    void loadNotifications().catch(() => {
-                      setNotifications([]);
-                    });
-                  }
-                }}
-              >
-                <summary
-                  className="relative flex cursor-pointer list-none items-center justify-center rounded-lg border border-wt-border bg-wt-surface-1 p-2.5 text-wt-text shadow-sm transition hover:bg-wt-surface-2 [&::-webkit-details-marker]:hidden"
-                  aria-label="Notifications"
-                >
-                  <IconBell className="text-wt-text-muted" />
-                  {unreadNotificationCount ? (
-                    <span className="absolute -right-1 -top-1 min-w-[18px] rounded-full bg-rose-600 px-1.5 py-0.5 text-[10px] font-semibold text-white">
-                      {unreadNotificationCount > 99 ? "99+" : unreadNotificationCount}
-                    </span>
-                  ) : null}
-                  <span className="sr-only">Notifications</span>
-                </summary>
-                <div className="absolute right-0 top-[calc(100%+6px)] z-50 w-[min(100vw-2rem,360px)] rounded-xl border border-wt-border bg-wt-surface-1 p-4 shadow-lg">
-                  <div className="mb-3 flex items-center justify-between">
-                    <h3 className="text-sm font-semibold">Notifications</h3>
-                    <button
-                      type="button"
-                      className="btn-ghost px-2.5 py-1.5 text-xs"
-                      onClick={() =>
-                        runAction("Mark all notifications read", async () => {
-                          await hrmsService.markAllNotificationsRead();
-                          await loadNotifications();
-                        })
-                      }
-                      disabled={actionLoading || !notifications.length}
-                    >
-                      Read All
-                    </button>
-                  </div>
-                  <div className="max-h-[320px] space-y-2 overflow-auto pr-1">
-                    {notifications.length ? (
-                      notifications.map((row, idx) => {
-                        const id = String(row.id ?? row.notification_id ?? row.notificationId ?? "").trim();
-                        const isRead = Boolean(row.is_read ?? row.isRead ?? false);
-                        const message = String(row.message ?? "").trim() || "—";
-                        const roleLabel = extractRoleFromNotificationMessage(message);
-                        return (
-                          <div key={id || `notification-${idx}`} className="flex items-start justify-between gap-2 rounded-lg border border-wt-border bg-wt-surface-2 p-2.5">
-                            <div className="min-w-0 space-y-1">
-                              <span className="inline-block rounded-full border border-wt-border bg-wt-surface-1 px-2 py-0.5 text-[10px] font-medium text-wt-text-muted">
-                                {roleLabel}
-                              </span>
-                              <p className={`text-sm break-words ${isRead ? "text-wt-text-muted" : "text-wt-text"}`}>{message}</p>
-                            </div>
-                            <button
-                              type="button"
-                              className="rounded-md border border-wt-border p-1 text-wt-text-muted hover:bg-wt-surface-3 disabled:opacity-40"
-                              aria-label={isRead ? "Already read" : "Mark as read"}
-                              title={isRead ? "Already read" : "Mark as read"}
-                              disabled={actionLoading || isRead || !id}
-                              onClick={() =>
-                                runAction("Mark notification read", async () => {
-                                  await apiClient.put(endpoints.notifications.readById(id));
-                                  await loadNotifications();
-                                })
-                              }
-                            >
-                              <IconCheck />
-                            </button>
-                          </div>
-                        );
-                      })
-                    ) : (
-                      <p className="text-sm text-wt-text-muted">No notifications.</p>
-                    )}
-                  </div>
-                </div>
-              </details>
-              <details className="group relative">
-                <summary
-                  className="flex cursor-pointer list-none items-center justify-center rounded-lg border border-wt-border bg-wt-surface-1 p-2.5 text-wt-text shadow-sm transition hover:bg-wt-surface-2 [&::-webkit-details-marker]:hidden"
-                  aria-label="Settings"
-                >
-                  <IconSettings className="h-5 w-5 text-wt-text-muted" />
-                  <span className="sr-only">Settings</span>
-                </summary>
-                <div
-                  className="absolute right-0 top-[calc(100%+6px)] z-50 w-[min(100vw-2rem,280px)] space-y-4 rounded-xl border border-wt-border bg-wt-surface-1 p-4 shadow-lg"
-                  role="menu"
-                >
-                  <div>
-                    <span className="mb-1.5 block text-xs font-medium text-wt-text-muted">Theme</span>
-                    <select
-                      value={theme}
-                      onChange={(event) => {
-                        const nextTheme = event.target.value as "light" | "dark" | "system";
-                        setTheme(nextTheme);
-                        applyTheme(nextTheme);
-                      }}
-                      className="input-field w-full px-3 py-2 text-sm"
-                      aria-label="Color theme"
-                    >
-                      <option value="light">Light</option>
-                      <option value="dark">Dark</option>
-                      <option value="system">System</option>
-                    </select>
-                  </div>
-                  <button
-                    type="button"
-                    className="w-full rounded-lg border border-red-600/90 bg-red-600 py-2.5 text-sm font-medium text-white shadow-sm transition hover:bg-red-700 active:bg-red-800"
-                    onClick={() => void signOut()}
-                  >
-                    Sign out
-                  </button>
-                </div>
-              </details>
-            </div>
-          </header>
-
-          <main className="min-h-0 flex-1 space-y-4 p-4 sm:p-6">
+    <>
+      <main className="min-h-0 flex-1 space-y-4 p-4 sm:p-6">
             {requiresSelfOnboarding ? (
               <section className="rounded-2xl border border-amber-300 bg-amber-50 text-amber-900 p-4">
                 <h3 className="font-semibold">Onboarding pending</h3>
@@ -4024,8 +3425,55 @@ function DashboardPageContent() {
               </section>
             ) : null}
             {activeTab === "overview" && !requiresSelfOnboarding ? (
-              <div className="grid sm:grid-cols-2 xl:grid-cols-4 gap-4">
-                <MetricCard label="Total Onboarded" value={metrics.totalOnboarded} loading={loading} />
+              <div className="space-y-4">
+                <div className="grid sm:grid-cols-2 xl:grid-cols-4 gap-4">
+                  <MetricCard label="Total Onboarded" value={metrics.totalOnboarded} loading={loading} />
+                </div>
+                {!hasManagerAccess ? (
+                  <section className="rounded-2xl border border-wt-border bg-wt-surface-1 p-5">
+                    <div className="flex items-center justify-between mb-3">
+                      <h3 className="font-semibold">My Allocated Projects</h3>
+                      <button
+                        type="button"
+                        className="btn-primary px-3 py-2"
+                        onClick={() =>
+                          runAction("Load assigned projects", async () => {
+                            const [assignedRes, myAllocationsRes] = await Promise.all([
+                              hrmsService.getAssignedProjects(),
+                              hrmsService.getMyAllocations(),
+                            ]);
+                            const normalizedProjects = normalizeAssignedProjects(
+                              toPagedRows(assignedRes.data ?? assignedRes)
+                            );
+                            const myAllocations = toPagedRows(myAllocationsRes.data ?? myAllocationsRes);
+                            setAssignedProjects(
+                              mergeProjectAndAllocationData(normalizedProjects, myAllocations)
+                            );
+                          })
+                        }
+                        disabled={actionLoading}
+                      >
+                        Refresh
+                      </button>
+                    </div>
+                    <DataTable
+                      title="Allocations show percent of an 8-hour day (100% = 8h)."
+                      columns={[
+                        "project_code",
+                        "project_name",
+                        "project_type",
+                        "role",
+                        "allocated_hours",
+                        "billing_status",
+                        "is_manager",
+                        "start_date",
+                        "end_date",
+                      ]}
+                      rows={assignedProjectsWithAllocationPct}
+                      emptyLabel="No projects are allocated to you yet."
+                    />
+                  </section>
+                ) : null}
               </div>
             ) : null}
 
@@ -4063,7 +3511,7 @@ function DashboardPageContent() {
             ) : null}
 
             {activeTab === "employee" && hasHrAccess ? (
-                  <section className="grid xl:grid-cols-[1.2fr_1fr] gap-4">
+                  <section className="space-y-4">
                     <div className="rounded-2xl border border-wt-border bg-wt-surface-1 p-5">
                       <h3 className="font-semibold mb-1">Create New Employee</h3>
                       <p className="text-sm text-wt-text-muted mb-4">Capture core onboarding details used by HR operations.</p>
@@ -4071,7 +3519,20 @@ function DashboardPageContent() {
                         <InputField label="Employee ID" value={onboardForm.emp_id} onChange={(v) => setOnboardForm((p) => ({ ...p, emp_id: v }))} />
                         <InputField label="Email" value={onboardForm.email} onChange={(v) => setOnboardForm((p) => ({ ...p, email: v }))} />
                         <InputField label="Name" value={onboardForm.name} onChange={(v) => setOnboardForm((p) => ({ ...p, name: v }))} />
-                        <SelectField label="User Type" value={onboardForm.user_type} options={["FULLTIME", "INTERN", "CONSULTANT"]} onChange={(v) => setOnboardForm((p) => ({ ...p, user_type: v }))} />
+                        <SelectField
+                          label="User Type"
+                          value={onboardForm.user_type}
+                          options={["FULLTIME", "INTERN", "CONSULTANT"]}
+                          onChange={(v) =>
+                            setOnboardForm((p) => {
+                              const ut = v as "FULLTIME" | "INTERN" | "CONSULTANT";
+                              if (ut === "INTERN") {
+                                return { ...p, user_type: ut, band_id: internBandId, role: "" };
+                              }
+                              return { ...p, user_type: ut, role: ut === "CONSULTANT" ? p.role : "" };
+                            })
+                          }
+                        />
                         <SelectField
                           label="Department"
                           value={onboardForm.department}
@@ -4087,56 +3548,74 @@ function DashboardPageContent() {
                             }))
                           }
                         />
-                        <label className="text-xs text-wt-text-muted flex flex-col gap-1">
-                          Band
-                          <select
-                            className="input-field px-3 py-2 text-sm"
-                            value={String(onboardForm.band_id)}
-                            onChange={(e) =>
-                              setOnboardForm((p) => ({
-                                ...p,
-                                band_id: Number(e.target.value || "1"),
-                                role: "",
-                              }))
-                            }
-                          >
-                            {onboardBands.length ? (
-                              onboardBands.map((row) => (
-                                <option key={String(row.id)} value={String(row.id)}>
-                                  {String(row.name ?? row.id ?? "")}
-                                </option>
-                              ))
-                            ) : (
-                              <option value="1">B1</option>
-                            )}
-                          </select>
-                        </label>
-                        <label className="text-xs text-wt-text-muted flex flex-col gap-1">
-                          Role
-                          <select
-                            className="input-field px-3 py-2 text-sm"
+                        {onboardForm.user_type !== "CONSULTANT" ? (
+                          <label className="text-xs text-wt-text-muted flex flex-col gap-1">
+                            Band
+                            <select
+                              className="input-field px-3 py-2 text-sm"
+                              value={String(onboardForm.band_id)}
+                              disabled={onboardForm.user_type === "INTERN"}
+                              onChange={(e) =>
+                                setOnboardForm((p) => ({
+                                  ...p,
+                                  band_id: Number(e.target.value || "1"),
+                                  role: "",
+                                }))
+                              }
+                            >
+                              {onboardBands.length ? (
+                                onboardBands.map((row) => (
+                                  <option key={String(row.id)} value={String(row.id)}>
+                                    {String(row.name ?? row.id ?? "")}
+                                  </option>
+                                ))
+                              ) : (
+                                <option value="1">B1</option>
+                              )}
+                            </select>
+                            {onboardForm.user_type === "INTERN" ? (
+                              <span className="text-[11px] text-wt-text-muted mt-0.5">Interns are assigned band B8.</span>
+                            ) : null}
+                          </label>
+                        ) : (
+                          <p className="text-xs text-wt-text-muted self-end">
+                            Consultant: band is not shown; a default band id is sent for system compatibility.
+                          </p>
+                        )}
+                        {onboardForm.user_type === "CONSULTANT" ? (
+                          <InputField
+                            label="Designation"
                             value={onboardForm.role}
-                            onChange={(e) =>
-                              setOnboardForm((p) => ({
-                                ...p,
-                                role: e.target.value,
-                              }))
-                            }
-                          >
-                            <option value="">
-                              {onboardForm.department
-                                ? availableOnboardRoles.length
-                                  ? "Select role"
-                                  : "No roles available for selected department"
-                                : "Select band and department first"}
-                            </option>
-                            {availableOnboardRoles.map((roleOption) => (
-                              <option key={roleOption} value={roleOption}>
-                                {roleOption}
+                            onChange={(v) => setOnboardForm((p) => ({ ...p, role: v }))}
+                          />
+                        ) : (
+                          <label className="text-xs text-wt-text-muted flex flex-col gap-1">
+                            Designation
+                            <select
+                              className="input-field px-3 py-2 text-sm"
+                              value={onboardForm.role}
+                              onChange={(e) =>
+                                setOnboardForm((p) => ({
+                                  ...p,
+                                  role: e.target.value,
+                                }))
+                              }
+                            >
+                              <option value="">
+                                {onboardForm.department
+                                  ? availableOnboardRoles.length
+                                    ? "Select designation"
+                                    : "No designations for selected department"
+                                  : "Select band and department first"}
                               </option>
-                            ))}
-                          </select>
-                        </label>
+                              {availableOnboardRoles.map((roleOption) => (
+                                <option key={roleOption} value={roleOption}>
+                                  {roleOption}
+                                </option>
+                              ))}
+                            </select>
+                          </label>
+                        )}
                         <InputField label="Phone Number" value={onboardForm.phone_number} onChange={(v) => setOnboardForm((p) => ({ ...p, phone_number: v }))} />
                         <SelectField label="Work Mode" value={onboardForm.work_mode} options={["WFO", "WFH", "HYBRID"]} onChange={(v) => setOnboardForm((p) => ({ ...p, work_mode: v }))} />
                         <SelectField label="Work Location" value={onboardForm.work_location_type} options={["OFFSHORE", "ONSITE", "HYBRID", "REMOTE"]} onChange={(v) => setOnboardForm((p) => ({ ...p, work_location_type: v }))} />
@@ -4155,7 +3634,7 @@ function DashboardPageContent() {
                           type="button"
                           className="btn-primary px-3 py-2"
                           onClick={() =>
-                            runAction("Create employee", () => {
+                            runAction("Create employee", async () => {
                               const email = onboardForm.email.trim();
                               const name = onboardForm.name.trim();
                               const department = onboardForm.department.trim();
@@ -4164,16 +3643,31 @@ function DashboardPageContent() {
                               const doj = onboardForm.doj.trim();
                               const doi = onboardForm.doi.trim();
                               const internshipDurationRaw = onboardForm.internship_duration.trim();
-                              const bandId = Number(onboardForm.band_id);
+                              const bandId =
+                                onboardForm.user_type === "CONSULTANT"
+                                  ? defaultConsultantBandId
+                                  : onboardForm.user_type === "INTERN"
+                                    ? internBandId
+                                    : Number(onboardForm.band_id);
 
                               if (!email || !name) {
                                 throw new Error("Email and Name are required.");
+                              }
+                              if (!isValidPersonName(name)) {
+                                throw new Error(
+                                  "Name should be 2–120 characters and contain letters (and spaces) only."
+                                );
                               }
                               if (!department) {
                                 throw new Error("Department is required.");
                               }
                               if (!role) {
-                                throw new Error("Role is required.");
+                                throw new Error("Designation is required.");
+                              }
+                              if (!phoneNumber || !isValidIndiaMobile(phoneNumber)) {
+                                throw new Error(
+                                  "Phone number must be a valid Indian mobile (10 digits, optional +91)."
+                                );
                               }
                               if (!Number.isFinite(bandId) || bandId <= 0) {
                                 throw new Error("Please select a valid Band.");
@@ -4204,20 +3698,21 @@ function DashboardPageContent() {
                               };
 
                               if (onboardForm.user_type === "INTERN") {
-                                return hrmsService.createOnboard({
+                                await hrmsService.createOnboard({
                                   ...basePayload,
                                   doj: null,
                                   doi,
                                   internship_duration: Number(internshipDurationRaw),
                                 });
+                              } else {
+                                await hrmsService.createOnboard({
+                                  ...basePayload,
+                                  doj,
+                                  doi: null,
+                                  internship_duration: null,
+                                });
                               }
-
-                              return hrmsService.createOnboard({
-                                ...basePayload,
-                                doj,
-                                doi: null,
-                                internship_duration: null,
-                              });
+                              await loadInviteOnboardingPreview();
                             })
                           }
                           disabled={actionLoading}
@@ -4228,9 +3723,8 @@ function DashboardPageContent() {
                           type="button"
                           className="btn-ghost px-3 py-2"
                           onClick={() =>
-                            runAction("Load onboarded users", async () => {
-                              const res = await hrmsService.getOnboardList({ page: "0", size: "20" });
-                              setOnboardedUsers(toRows(res.data));
+                            runAction("Refresh onboarding list", async () => {
+                              await loadInviteOnboardingPreview();
                             })
                           }
                           disabled={actionLoading}
@@ -4241,53 +3735,15 @@ function DashboardPageContent() {
                     </div>
 
                     <div className="rounded-2xl border border-wt-border bg-wt-surface-1 p-5">
-                      <h3 className="font-semibold mb-1">Employee Profile</h3>
-                      <p className="text-sm text-wt-text-muted mb-3">Search by employee ID.</p>
-                      <InputField label="Employee ID" value={empId} onChange={setEmpId} />
-                      <div className="mt-3">
-                        <button
-                          type="button"
-                          className="btn-primary px-3 py-2"
-                          onClick={() =>
-                            runAction("Fetch employee profile", async () => {
-                              if (userRoles.includes("ROLE_HR")) {
-                                const res = await hrmsService.getEmployeeProfile(empId);
-                                setEmployeeProfile((res.data ?? null) as Record<string, unknown> | null);
-                                return;
-                              }
-                              const lookupRes = await hrmsService.getUser({ empId });
-                              const payload = ((lookupRes as { data?: unknown }).data ?? lookupRes) as
-                                | Record<string, unknown>
-                                | null;
-                              const candidate =
-                                (payload?.user as Record<string, unknown> | undefined) ??
-                                (payload?.profile as Record<string, unknown> | undefined) ??
-                                payload;
-                              setEmployeeProfile(
-                                candidate && typeof candidate === "object" ? candidate : null
-                              );
-                            })
-                          }
-                          disabled={actionLoading}
-                        >
-                          View Profile
-                        </button>
-                      </div>
-                      <dl className="mt-4 grid grid-cols-2 gap-y-2 text-sm">
-                        <ProfileField label="Name" value={employeeProfile?.name} />
-                        <ProfileField label="Email" value={employeeProfile?.email} />
-                        <ProfileField label="Status" value={employeeProfile?.status} />
-                        <ProfileField label="Department" value={employeeProfile?.department} />
-                        <ProfileField label="User Type" value={employeeProfile?.user_type} />
-                        <ProfileField label="Work Mode" value={employeeProfile?.work_mode} />
-                      </dl>
-                    </div>
-                    <div className="xl:col-span-2 rounded-2xl border border-wt-border bg-wt-surface-1 p-5">
-                      <h3 className="font-semibold mb-3">Onboarded Employees</h3>
+                      <h3 className="font-semibold mb-1">Employee onboarding</h3>
+                      <p className="text-sm text-wt-text-muted mb-3">
+                        Up to six most recent employees with status <strong>INVITE</strong> (active and
+                        offboarded records are hidden).
+                      </p>
                       <DataTable
                         columns={["emp_id", "name", "email", "status", "user_type", "department"]}
-                        rows={onboardedUsers}
-                        emptyLabel="No employee records loaded yet."
+                        rows={inviteOnboardingRows}
+                        emptyLabel="No invite-stage employees found."
                       />
                     </div>
                   </section>
@@ -4296,17 +3752,71 @@ function DashboardPageContent() {
             {activeTab === "allocation" && !requiresSelfOnboarding ? (
               <>
                 {hasHrAccess ? (
-                  <section className="grid xl:grid-cols-2 gap-4">
+                  <section className="space-y-4">
+                    <div className="flex flex-wrap gap-2 border-b border-wt-border pb-3">
+                      <button
+                        type="button"
+                        onClick={() => setAllocationHrSubTab("project")}
+                        className={`rounded-lg px-3 py-2 text-sm font-medium transition ${
+                          allocationHrSubTab === "project"
+                            ? "bg-wt-surface-3 text-wt-text"
+                            : "text-wt-text-muted hover:bg-wt-surface-2"
+                        }`}
+                      >
+                        Create project
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setAllocationHrSubTab("allocate")}
+                        className={`rounded-lg px-3 py-2 text-sm font-medium transition ${
+                          allocationHrSubTab === "allocate"
+                            ? "bg-wt-surface-3 text-wt-text"
+                            : "text-wt-text-muted hover:bg-wt-surface-2"
+                        }`}
+                      >
+                        Project allocation
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setAllocationHrSubTab("list")}
+                        className={`rounded-lg px-3 py-2 text-sm font-medium transition ${
+                          allocationHrSubTab === "list"
+                            ? "bg-wt-surface-3 text-wt-text"
+                            : "text-wt-text-muted hover:bg-wt-surface-2"
+                        }`}
+                      >
+                        Allocation list
+                      </button>
+                    </div>
+
+                    {allocationHrSubTab === "project" ? (
                     <div ref={projectCrudFormRef} className="rounded-2xl border border-wt-border bg-wt-surface-1 p-5 space-y-4">
-                      <h3 className="font-semibold">Project CRUD</h3>
+                      <h3 className="font-semibold">Create project</h3>
                       <div className="grid sm:grid-cols-2 gap-3">
-                        <InputField label="Project Code" value={projectForm.project_code} onChange={(v) => setProjectForm((p) => ({ ...p, project_code: v }))} />
-                        <InputField label="Project Name" value={projectForm.project_name} onChange={(v) => setProjectForm((p) => ({ ...p, project_name: v }))} />
+                        <InputField
+                          label="Project Name"
+                          value={projectForm.project_name}
+                          onChange={(v) => setProjectForm((p) => ({ ...p, project_name: v }))}
+                        />
+                        <InputField
+                          label="Client name"
+                          value={projectForm.client_name}
+                          onChange={(v) => setProjectForm((p) => ({ ...p, client_name: v }))}
+                        />
+                        <AccountManagerSelect
+                          value={projectForm.account_manager}
+                          onChange={(v) => setProjectForm((p) => ({ ...p, account_manager: v }))}
+                        />
                         <SelectField
                           label="Project Type"
                           value={projectForm.project_type}
                           options={["IN_HOUSE", "STAFFING", "PRODUCT"]}
-                          onChange={(v) => setProjectForm((p) => ({ ...p, project_type: v }))}
+                          onChange={(v) =>
+                            setProjectForm((p) => ({
+                              ...p,
+                              project_type: v as "IN_HOUSE" | "STAFFING" | "PRODUCT",
+                            }))
+                          }
                         />
                       </div>
                       <div className="flex flex-wrap gap-2">
@@ -4317,12 +3827,29 @@ function DashboardPageContent() {
                             runAction(
                               editingProjectCode ? "Update project" : "Create project",
                               async () => {
+                                const name = projectForm.project_name.trim();
+                                if (!name) {
+                                  throw new Error("Project name is required.");
+                                }
+                                const am = projectForm.account_manager.trim();
+                                if (!am) {
+                                  throw new Error("Account manager is required.");
+                                }
+                                const project_code = generateAutomaticProjectCode();
                                 await hrmsService.createProject({
-                                  project_code: projectForm.project_code.trim(),
-                                  project_name: projectForm.project_name.trim(),
+                                  project_code,
+                                  project_name: name,
                                   project_type: projectForm.project_type,
+                                  client_name: projectForm.client_name.trim() || null,
+                                  account_manager: am,
                                 });
                                 setEditingProjectCode("");
+                                setProjectForm((p) => ({
+                                  ...p,
+                                  project_name: "",
+                                  client_name: "",
+                                  account_manager: "",
+                                }));
                                 const rows = await loadAllProjectsForHr();
                                 setProjects(rows);
                               }
@@ -4424,31 +3951,95 @@ function DashboardPageContent() {
                         )}
                       </div>
                     </div>
+                    ) : null}
+
+                    {allocationHrSubTab === "allocate" ? (
                     <div ref={allocationFormRef} className="rounded-2xl border border-wt-border bg-wt-surface-1 p-5 space-y-4">
                       <h3 className="font-semibold">Employee Allocation Form</h3>
                       <div className="grid sm:grid-cols-2 gap-3">
-                        <label className="text-xs text-wt-text-muted flex flex-col gap-1">
-                          Employee Name
-                          <select
-                            className="input-field px-3 py-2 text-sm"
-                            value={allocationForm.employee_email}
-                            onChange={(e) =>
-                              setAllocationForm((p) => ({
-                                ...p,
-                                employee_email: e.target.value,
-                              }))
-                            }
+                        <div
+                          ref={allocationEmployeeComboboxRef}
+                          className="relative text-xs text-wt-text-muted flex flex-col gap-1"
+                        >
+                          <span className="block">Employee</span>
+                          <button
+                            type="button"
+                            className="input-field flex w-full items-center justify-between gap-2 px-3 py-2 text-left text-sm text-wt-text"
+                            aria-expanded={allocationEmployeePickerOpen}
+                            aria-haspopup="listbox"
+                            onClick={() => {
+                              setAllocationEmployeePickerOpen((open) => {
+                                const next = !open;
+                                if (next) setAllocationEmployeePickerQuery("");
+                                return next;
+                              });
+                            }}
                           >
-                            <option value="">Select employee</option>
-                            {allocationUsers.map((u) => (
-                              <option key={u.email} value={u.email}>
-                                {u.name} ({u.email})
-                              </option>
-                            ))}
-                          </select>
-                        </label>
+                            <span className="min-w-0 truncate">{allocationEmployeeSelectLabel}</span>
+                            <span className="shrink-0 text-wt-text-muted" aria-hidden>
+                              ▾
+                            </span>
+                          </button>
+                          {allocationEmployeePickerOpen ? (
+                            <div
+                              className="absolute left-0 right-0 top-full z-50 mt-1 space-y-2 rounded-xl border border-wt-border bg-wt-surface-1 p-2 shadow-lg"
+                              role="listbox"
+                              aria-label="Employees"
+                            >
+                              <input
+                                type="search"
+                                className="input-field w-full px-3 py-2 text-sm"
+                                placeholder="Search employees…"
+                                value={allocationEmployeePickerQuery}
+                                onChange={(e) => setAllocationEmployeePickerQuery(e.target.value)}
+                                autoComplete="off"
+                                autoFocus
+                              />
+                              <div className="max-h-52 overflow-auto rounded-lg border border-wt-border">
+                                <button
+                                  type="button"
+                                  className="block w-full px-3 py-2 text-left text-sm text-wt-text-muted hover:bg-wt-surface-2"
+                                  onClick={() => {
+                                    setAllocationForm((p) => ({ ...p, employee_email: "" }));
+                                    setAllocationEmployeePickerOpen(false);
+                                    setAllocationEmployeePickerQuery("");
+                                  }}
+                                >
+                                  Clear selection
+                                </button>
+                                {allocationEmployeesPickerFiltered.length ? (
+                                  allocationEmployeesPickerFiltered.map((u) => (
+                                    <button
+                                      key={u.email}
+                                      type="button"
+                                      role="option"
+                                      className={`block w-full border-t border-wt-border px-3 py-2 text-left text-sm hover:bg-wt-surface-2 ${
+                                        allocationForm.employee_email === u.email
+                                          ? "bg-indigo-500/10 font-medium"
+                                          : ""
+                                      }`}
+                                      onClick={() => {
+                                        setAllocationForm((p) => ({ ...p, employee_email: u.email }));
+                                        setAllocationEmployeePickerOpen(false);
+                                        setAllocationEmployeePickerQuery("");
+                                      }}
+                                    >
+                                      {u.role
+                                        ? `${u.name} | ${u.role} (${u.email})`
+                                        : `${u.name} (${u.email})`}
+                                    </button>
+                                  ))
+                                ) : (
+                                  <p className="px-3 py-4 text-center text-sm text-wt-text-muted">
+                                    No employees match your search.
+                                  </p>
+                                )}
+                              </div>
+                            </div>
+                          ) : null}
+                        </div>
                         <label className="text-xs text-wt-text-muted flex flex-col gap-1">
-                          Project Name
+                          Project
                           <select
                             className="input-field px-3 py-2 text-sm"
                             value={allocationForm.project_code}
@@ -4468,7 +4059,7 @@ function DashboardPageContent() {
                           </select>
                         </label>
                         <label className="text-xs text-wt-text-muted flex flex-col gap-1">
-                          Role
+                          Designation
                           <select
                             className="input-field px-3 py-2 text-sm"
                             value={allocationForm.role}
@@ -4479,7 +4070,7 @@ function DashboardPageContent() {
                               }))
                             }
                           >
-                            <option value="">Select role</option>
+                            <option value="">Select designation</option>
                             {allocationRoles.map((role) => (
                               <option key={role} value={role}>
                                 {role}
@@ -4487,9 +4078,33 @@ function DashboardPageContent() {
                             ))}
                           </select>
                         </label>
-                        <InputField label="Allocated Hours (1-8)" value={allocationForm.allocated_hours} onChange={(v) => setAllocationForm((p) => ({ ...p, allocated_hours: v }))} />
-                        <SelectField label="Allocation Type" value={allocationForm.allocation_type} options={["DEPLOYABLE", "STAFFING", "NONDEPLOYABLE", "NONBILLABLE", "LOCKED"]} onChange={(v) => setAllocationForm((p) => ({ ...p, allocation_type: v }))} />
-                        <SelectField label="Billing Status" value={allocationForm.billing_status} options={["BILLED", "BUFFER", "UNBILLED"]} onChange={(v) => setAllocationForm((p) => ({ ...p, billing_status: v }))} />
+                        <SelectField
+                          label="Allocated hours"
+                          value={allocationForm.allocated_hours}
+                          options={
+                            designationAllowsFlexibleHours(allocationForm.role)
+                              ? [...FLEXIBLE_ALLOCATION_HOUR_OPTIONS]
+                              : [...RESTRICTED_ALLOCATION_HOUR_OPTIONS]
+                          }
+                          onChange={(v) => setAllocationForm((p) => ({ ...p, allocated_hours: v }))}
+                        />
+                        <SelectField
+                          label="Allocation Type"
+                          value={allocationForm.allocation_type}
+                          options={["DEPLOYABLE", "STAFFING", "LOCKED"]}
+                          onChange={(v) => setAllocationForm((p) => ({ ...p, allocation_type: v }))}
+                        />
+                        <SelectField
+                          label="Billing Status"
+                          value={allocationForm.billing_status}
+                          options={["BILLED", "BUFFER", "INVESTMENT"]}
+                          onChange={(v) =>
+                            setAllocationForm((p) => ({
+                              ...p,
+                              billing_status: v as "BILLED" | "BUFFER" | "INVESTMENT",
+                            }))
+                          }
+                        />
                         <InputField label="Start Date" value={allocationForm.start_date} onChange={(v) => setAllocationForm((p) => ({ ...p, start_date: v }))} type="date" />
                         <InputField label="End Date" value={allocationForm.end_date} onChange={(v) => setAllocationForm((p) => ({ ...p, end_date: v }))} type="date" />
                       </div>
@@ -4508,11 +4123,28 @@ function DashboardPageContent() {
                           onClick={() =>
                             runAction(editingAllocationId ? "Update allocation" : "Create allocation", async () => {
                               const isManager = Boolean(allocationForm.is_manager);
+                              const hrs = Number(allocationForm.allocated_hours);
+                              if (!Number.isFinite(hrs) || hrs <= 0) {
+                                throw new Error("Allocated hours must be a positive number.");
+                              }
+                              if (!designationAllowsFlexibleHours(allocationForm.role)) {
+                                if (hrs !== 4 && hrs !== 8) {
+                                  throw new Error(
+                                    "Allocated hours must be 4 or 8 for this designation (or pick a flexible designation such as Designer / DevOps / PM / DM / leadership)."
+                                  );
+                                }
+                              } else {
+                                if (!Number.isInteger(hrs) || hrs < 1 || hrs > 8) {
+                                  throw new Error(
+                                    "Allocated hours must be a whole number from 1 to 8 for this designation."
+                                  );
+                                }
+                              }
                               const payload = {
                                 employee_email: allocationForm.employee_email.trim(),
                                 project_code: allocationForm.project_code.trim(),
                                 role: allocationForm.role.trim() || null,
-                                allocated_hours: Number(allocationForm.allocated_hours),
+                                allocated_hours: hrs,
                                 start_date: allocationForm.start_date,
                                 end_date: allocationForm.end_date || null,
                                 allocation_type: allocationForm.allocation_type,
@@ -4538,6 +4170,7 @@ function DashboardPageContent() {
                               });
                               setEditingAllocationId("");
                               await loadAllocationsForHr();
+                              setAllocationHrSubTab("list");
                             })
                           }
                           disabled={actionLoading}
@@ -4550,6 +4183,7 @@ function DashboardPageContent() {
                           onClick={() =>
                             runAction("Load allocations", async () => {
                               await loadAllocationsForHr();
+                              setAllocationHrSubTab("list");
                               requestAnimationFrame(() => {
                                 allocationRecordsRef.current?.scrollIntoView({
                                   behavior: "smooth",
@@ -4565,23 +4199,41 @@ function DashboardPageContent() {
                           <IconRefresh />
                         </button>
                       </div>
+                    </div>
+                    ) : null}
+
+                    {allocationHrSubTab === "list" ? (
+                      <>
                       <div
                         ref={allocationRecordsRef}
                         className="rounded-xl border border-wt-border bg-wt-surface-2 p-3 space-y-2"
                       >
-                        <div className="flex items-center justify-between">
+                        <div className="flex flex-wrap items-center justify-between gap-2">
                           <p className="text-sm font-medium">Allocation Records</p>
-                          <span className="text-xs text-wt-text-muted">{allocations.length} row(s)</span>
+                          <label className="flex items-center gap-2 text-xs text-wt-text-muted">
+                            <input
+                              type="checkbox"
+                              checked={allocationListMissingEndDateOnly}
+                              onChange={(e) => setAllocationListMissingEndDateOnly(e.target.checked)}
+                            />
+                            Only without end date
+                          </label>
+                          <span className="text-xs text-wt-text-muted">
+                            {allocationsForListView.length} row(s)
+                          </span>
                         </div>
-                        {allocations.length ? (
+                        {allocationsForListView.length ? (
                           <div className="wt-scroll-both max-h-[min(70vh,520px)] rounded-xl border border-wt-border">
                             <table className="min-w-full text-sm">
                               <thead className="bg-wt-surface-2 text-wt-text-muted">
                                 <tr>
                                   <th className="text-left px-3 py-2 font-medium whitespace-nowrap">ALLOCATED PROJECT</th>
                                   <th className="text-left px-3 py-2 font-medium whitespace-nowrap">EMPLOYEE NAME</th>
-                                  <th className="text-left px-3 py-2 font-medium whitespace-nowrap">ROLE</th>
-                                  <th className="text-left px-3 py-2 font-medium whitespace-nowrap">ALLOCATED HOURS</th>
+                                  <th className="text-left px-3 py-2 font-medium whitespace-nowrap">ACC MANAGER</th>
+                                  <th className="text-left px-3 py-2 font-medium whitespace-nowrap">DESIGNATION</th>
+                                  <th className="text-left px-3 py-2 font-medium whitespace-nowrap">
+                                    ALLOCATION (% of 8h)
+                                  </th>
                                   <th className="text-left px-3 py-2 font-medium whitespace-nowrap">ALLOCATION TYPE</th>
                                   <th className="text-left px-3 py-2 font-medium whitespace-nowrap">BILLING STATUS</th>
                                   <th className="text-left px-3 py-2 font-medium whitespace-nowrap">START DATE</th>
@@ -4592,7 +4244,7 @@ function DashboardPageContent() {
                                 </tr>
                               </thead>
                               <tbody>
-                                {allocations.map((row, idx) => {
+                                {allocationsForListView.map((row, idx) => {
                                   const allocationId = String(
                                     row.id ?? row.allocation_id ?? row.allocationId ?? ""
                                   ).trim();
@@ -4622,14 +4274,18 @@ function DashboardPageContent() {
                                   const billingStatus = String(
                                     row.billing_status ?? row.billingStatus ?? "BILLED"
                                   ).trim();
-                                  const activeRaw = row.is_active ?? row.isActive;
                                   const isManagerRaw = row.is_manager;
                                   return (
                                     <tr key={`${allocationId || "alloc"}-${idx}`} className="border-t border-wt-border">
                                       <td className="px-3 py-2 whitespace-nowrap">{String(row.allocated_project ?? "—")}</td>
                                       <td className="px-3 py-2 whitespace-nowrap">{String(row.employee_name ?? "—")}</td>
+                                      <td className="px-3 py-2 whitespace-nowrap">{allocationAccManagerCell(row)}</td>
                                       <td className="px-3 py-2 whitespace-nowrap">{String(row.role ?? "—")}</td>
-                                      <td className="px-3 py-2 whitespace-nowrap">{String(row.allocated_hours ?? "—")}</td>
+                                      <td className="px-3 py-2 whitespace-nowrap">
+                                        {formatAllocatedHoursPercentLabel(
+                                          row.allocated_hours ?? row.allocatedHours ?? row.hours
+                                        )}
+                                      </td>
                                       <td className="px-3 py-2 whitespace-nowrap">{String(row.allocation_type ?? "—")}</td>
                                       <td className="px-3 py-2 whitespace-nowrap">{String(row.billing_status ?? row.billingStatus ?? "—")}</td>
                                       <td className="px-3 py-2 whitespace-nowrap">{String(row.start_date ?? "—")}</td>
@@ -4656,20 +4312,21 @@ function DashboardPageContent() {
                                                 start_date: startDate,
                                                 end_date: endDate,
                                                 allocation_type:
-                                                  ["DEPLOYABLE", "STAFFING", "NONDEPLOYABLE", "NONBILLABLE", "LOCKED"].includes(
+                                                  ["DEPLOYABLE", "STAFFING", "LOCKED"].includes(
                                                     allocationType.toUpperCase()
                                                   )
                                                     ? allocationType.toUpperCase()
                                                     : "DEPLOYABLE",
                                                 billing_status:
-                                                  ["BILLED", "BUFFER", "UNBILLED"].includes(
+                                                  ["BILLED", "BUFFER", "INVESTMENT"].includes(
                                                     billingStatus.toUpperCase()
                                                   )
-                                                    ? billingStatus.toUpperCase()
+                                                    ? (billingStatus.toUpperCase() as "BILLED" | "BUFFER" | "INVESTMENT")
                                                     : "BILLED",
                                                 is_manager: Boolean(isManagerRaw),
                                               }));
                                               setEditingAllocationId(allocationId);
+                                              setAllocationHrSubTab("allocate");
                                               requestAnimationFrame(() => {
                                                 allocationFormRef.current?.scrollIntoView({
                                                   behavior: "smooth",
@@ -4710,6 +4367,19 @@ function DashboardPageContent() {
                       </div>
 
                       <div className="rounded-xl border border-wt-border bg-wt-surface-2 p-3 space-y-2">
+                        <p className="text-sm font-medium">Bench &amp; investment snapshot</p>
+                        <p className="text-xs text-wt-text-muted mb-2">
+                          Merges bench/talent-pool rows with employees marked <strong>INVESTMENT</strong> on an allocation.
+                          Extend backend APIs for full day-wise bench forecasting and talent-pool coverage.
+                        </p>
+                        <DataTable
+                          columns={["source", "name", "email", "bench_days"]}
+                          rows={investmentBenchRows}
+                          emptyLabel="No bench or investment rows loaded (refresh bench reports and allocations)."
+                        />
+                      </div>
+
+                      <div className="rounded-xl border border-wt-border bg-wt-surface-2 p-3 space-y-2">
                         <div className="flex items-center justify-between">
                           <p className="text-sm font-medium">Allocation Forecasting (ending in 2 weeks)</p>
                           <button
@@ -4742,30 +4412,222 @@ function DashboardPageContent() {
                           </button>
                         </div>
                         <DataTable
-                          columns={["project_code", "project_name", "employee_name", "employee_email", "billing_status", "role"]}
+                          columns={["project_code", "project_name", "employee_name", "billing_status", "role"]}
                           rows={allocationForecastRows}
                           emptyLabel="No employees with allocations ending in the next 2 weeks."
                         />
                       </div>
-                    </div>
+                      </>
+                    ) : null}
                   </section>
                 ) : (
                   <section className="rounded-2xl border border-wt-border bg-wt-surface-1 p-5">
                     <p className="text-sm text-wt-text-muted">
-                      Allocation management is available for HR/Admin. Use the Projects tab to view assigned projects.
+                      Allocation management is available for HR/Admin. Use Allocation &amp; Projects to manage assignments.
                     </p>
                   </section>
                 )}
               </>
             ) : null}
 
-            {activeTab === "projects" && !requiresSelfOnboarding ? (
+            {activeTab === "allocation-extension" && !requiresSelfOnboarding ? (
+              <AllocationExtensionPanel />
+            ) : null}
+
+            {activeTab === "timelog" && !requiresSelfOnboarding ? (
+              <section className="space-y-4">
+                {hasManagerAccess || hasHrAccess ? (
+                  <div className="flex flex-wrap gap-2 border-b border-wt-border pb-3">
+                    <button
+                      type="button"
+                      onClick={() => setTimelogSubTab("my")}
+                      className={`rounded-lg px-3 py-2 text-sm font-medium transition ${
+                        timelogSubTab === "my"
+                          ? "bg-wt-surface-3 text-wt-text"
+                          : "text-wt-text-muted hover:bg-wt-surface-2"
+                      }`}
+                    >
+                      My timelogs
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setTimelogSubTab("team")}
+                      className={`rounded-lg px-3 py-2 text-sm font-medium transition ${
+                        timelogSubTab === "team"
+                          ? "bg-wt-surface-3 text-wt-text"
+                          : "text-wt-text-muted hover:bg-wt-surface-2"
+                      }`}
+                    >
+                      Team timelogs
+                    </button>
+                  </div>
+                ) : null}
+
+                {timelogSubTab === "my" ? (
+                <div className="rounded-2xl border border-wt-border bg-wt-surface-1 p-5 space-y-4">
+                  <div className="flex flex-wrap items-center justify-between gap-3 border-b border-wt-border pb-4">
+                    <h3 className="font-semibold">Timelog</h3>
+                    <button
+                      type="button"
+                      className="btn-primary px-3 py-2"
+                      onClick={() =>
+                        runAction("Load timelogs", async () => {
+                          await loadTimelogsForCurrentRole();
+                        })
+                      }
+                      disabled={actionLoading}
+                    >
+                      Refresh
+                    </button>
+                  </div>
+
+                  <div className="rounded-xl border border-wt-border bg-wt-surface-2 p-4 space-y-3">
+                    <div>
+                      <p className="text-sm font-medium text-wt-text">Log time</p>
+                      <p className="text-xs text-wt-text-muted mt-1">
+                        Submit hours against a project. HR and Admin can optionally attribute the entry to another
+                        employee when the service accepts <code className="text-[11px]">employee_email</code> on create.
+                      </p>
+                    </div>
+                    <div className="grid sm:grid-cols-2 gap-3">
+                      <label className="text-xs text-wt-text-muted flex flex-col gap-1">
+                        Project
+                        <select
+                          className="input-field px-3 py-2 text-sm"
+                          value={timelogForm.project_code}
+                          onChange={(e) =>
+                            setTimelogForm((prev) => ({
+                              ...prev,
+                              project_code: e.target.value,
+                            }))
+                          }
+                        >
+                          <option value="">Select project</option>
+                          {timelogProjects.map((project) => (
+                            <option key={project.code} value={project.code}>
+                              {project.name} ({project.code})
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      <InputField
+                        label="Log Date"
+                        value={timelogForm.log_date}
+                        onChange={(v) => setTimelogForm((prev) => ({ ...prev, log_date: v }))}
+                        type="date"
+                      />
+                      <SelectField
+                        label="Hours"
+                        value={timelogForm.hours}
+                        options={["1", "2", "3"]}
+                        onChange={(v) => setTimelogForm((prev) => ({ ...prev, hours: v }))}
+                      />
+                      <InputField
+                        label="Description"
+                        value={timelogForm.description}
+                        onChange={(v) => setTimelogForm((prev) => ({ ...prev, description: v }))}
+                      />
+                      {hasHrAccess ? (
+                        <div className="sm:col-span-2">
+                          <label className="text-xs text-wt-text-muted flex flex-col gap-1">
+                            Employee (optional)
+                            <select
+                              className="input-field px-3 py-2 text-sm"
+                              value={timelogForm.subject_employee_email}
+                              onChange={(e) =>
+                                setTimelogForm((prev) => ({
+                                  ...prev,
+                                  subject_employee_email: e.target.value,
+                                }))
+                              }
+                            >
+                              <option value="">Myself (current login)</option>
+                              {hrTimelogDirectoryEmails.map((email) => (
+                                <option key={email} value={email}>
+                                  {email}
+                                </option>
+                              ))}
+                            </select>
+                          </label>
+                        </div>
+                      ) : null}
+                    </div>
+                    <div>
+                      <button
+                        type="button"
+                        className="btn-primary px-3 py-2"
+                        onClick={() =>
+                          runAction("Submit timelog", async () => {
+                            const projectCode = timelogForm.project_code.trim();
+                            const logDate = timelogForm.log_date.trim();
+                            if (!projectCode || !logDate) {
+                              throw new Error("Project and Log Date are required.");
+                            }
+                            const subject = timelogForm.subject_employee_email.trim().toLowerCase();
+                            const body: Record<string, unknown> = {
+                              project_code: projectCode,
+                              log_date: logDate,
+                              hours: Number(timelogForm.hours),
+                              description: timelogForm.description.trim() || null,
+                            };
+                            if (hasHrAccess && subject) {
+                              body.employee_email = subject;
+                              body.employeeEmail = subject;
+                            }
+                            await apiClient.post(endpoints.timelog.root, {
+                              contentType: "application/json",
+                              body: JSON.stringify(body),
+                            });
+                            setTimelogForm({
+                              project_code: "",
+                              log_date: "",
+                              hours: "1",
+                              description: "",
+                              subject_employee_email: "",
+                            });
+                            try {
+                              await loadTimelogsForCurrentRole(
+                                hasHrAccess && subject ? subject : undefined
+                              );
+                            } catch {
+                              /* submission succeeded; ignore refresh issue */
+                            }
+                          })
+                        }
+                        disabled={actionLoading}
+                      >
+                        Submit Timelog
+                      </button>
+                    </div>
+                  </div>
+
+                  {hasHrAccess ? (
+                    <p className="text-xs text-wt-text-muted">
+                      Table below shows organization-wide entries after refresh. Use the{" "}
+                      <strong>Team timelogs</strong> tab to filter by employee email.
+                    </p>
+                  ) : null}
+                  {hasHrAccess ? (
+                    <DataTable
+                      columns={["project_code", "employee_name", "log_date", "hours", "description"]}
+                      rows={hrVisibleTimelogs}
+                      emptyLabel="No timelogs loaded."
+                    />
+                  ) : (
+                    <DataTable
+                      columns={["project_code", "log_date", "hours", "description"]}
+                      rows={timelogs}
+                      emptyLabel="No timelogs loaded."
+                    />
+                  )}
+                </div>
+                ) : hasManagerAccess || hasHrAccess ? (
               <div className="space-y-4">
                 {hasManagerAccess ? (
-                  <section className="rounded-2xl border border-wt-border bg-wt-surface-1 p-5">
+                  <div className="rounded-2xl border border-wt-border bg-wt-surface-1 p-5">
                     <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
                       <div>
-                        <h3 className="font-semibold">Manager Projects & Team</h3>
+                        <h3 className="font-semibold">Manager Projects &amp; Team</h3>
                         <p className="text-xs text-wt-text-muted mt-1">
                           View your allocated projects and the employees under each project.
                         </p>
@@ -4795,7 +4657,15 @@ function DashboardPageContent() {
                             onChange={setSelectedManagerProjectCode}
                           />
                           <DataTable
-                            columns={["project_code", "project_name", "project_type", "employee", "email", "role", "allocated_hours"]}
+                            columns={[
+                              "project_code",
+                              "project_name",
+                              "project_type",
+                              "employee",
+                              "email",
+                              "role",
+                              "allocated_hours",
+                            ]}
                             rows={managerProjectTeamRows}
                             emptyLabel="No employees found for the selected project."
                           />
@@ -4806,173 +4676,16 @@ function DashboardPageContent() {
                         No manager data yet. Click <strong>Refresh manager view</strong> to load your portfolio.
                       </p>
                     )}
-                  </section>
-                ) : null}
-                {!hasManagerAccess ? (
-                  <section className="rounded-2xl border border-wt-border bg-wt-surface-1 p-5">
-                    <div className="flex items-center justify-between mb-3">
-                      <h3 className="font-semibold">My Allocated Projects</h3>
-                      <button
-                        type="button"
-                        className="btn-primary px-3 py-2"
-                        onClick={() =>
-                          runAction("Load assigned projects", async () => {
-                            const [assignedRes, myAllocationsRes] = await Promise.all([
-                              hrmsService.getAssignedProjects(),
-                              hrmsService.getMyAllocations(),
-                            ]);
-                            const normalizedProjects = normalizeAssignedProjects(
-                              toPagedRows(assignedRes.data ?? assignedRes)
-                            );
-                            const myAllocations = toPagedRows(myAllocationsRes.data ?? myAllocationsRes);
-                            setAssignedProjects(
-                              mergeProjectAndAllocationData(normalizedProjects, myAllocations)
-                            );
-                          })
-                        }
-                        disabled={actionLoading}
-                      >
-                        Refresh
-                      </button>
-                    </div>
-                    <DataTable
-                    columns={["project_code", "project_name", "project_type", "role", "allocated_hours", "billing_status", "is_manager", "start_date", "end_date"]}
-                      rows={assignedProjects}
-                      emptyLabel="No projects are allocated to you yet."
-                    />
-                  </section>
-                ) : null}
-              </div>
-            ) : null}
-
-            {activeTab === "allocation-extension" && !requiresSelfOnboarding ? (
-              <AllocationExtensionPanel />
-            ) : null}
-
-            {activeTab === "timelog" && !requiresSelfOnboarding ? (
-              <section>
-                <div className="rounded-2xl border border-wt-border bg-wt-surface-1 p-5">
-                  <div className="flex items-center justify-between mb-3">
-                    <h3 className="font-semibold">Timelog Entries</h3>
-                    <button
-                      type="button"
-                      className="btn-primary px-3 py-2"
-                      onClick={() =>
-                        runAction("Load timelogs", async () => {
-                          await loadTimelogsForCurrentRole();
-                        })
-                      }
-                      disabled={actionLoading}
-                    >
-                      Refresh
-                    </button>
                   </div>
-                  {!userRoles.includes("ROLE_HR") ? (
-                    <>
-                      <div className="grid sm:grid-cols-2 gap-3 mb-4">
-                        <label className="text-xs text-wt-text-muted flex flex-col gap-1">
-                          Project
-                          <select
-                            className="input-field px-3 py-2 text-sm"
-                            value={timelogForm.project_code}
-                            onChange={(e) =>
-                              setTimelogForm((prev) => ({
-                                ...prev,
-                                project_code: e.target.value,
-                              }))
-                            }
-                          >
-                            <option value="">Select project</option>
-                            {timelogProjects.map((project) => (
-                              <option key={project.code} value={project.code}>
-                                {project.name} ({project.code})
-                              </option>
-                            ))}
-                          </select>
-                        </label>
-                        <InputField
-                          label="Log Date"
-                          value={timelogForm.log_date}
-                          onChange={(v) => setTimelogForm((prev) => ({ ...prev, log_date: v }))}
-                          type="date"
-                        />
-                        <SelectField
-                          label="Hours"
-                          value={timelogForm.hours}
-                          options={["1", "2", "3"]}
-                          onChange={(v) => setTimelogForm((prev) => ({ ...prev, hours: v }))}
-                        />
-                        <InputField
-                          label="Description"
-                          value={timelogForm.description}
-                          onChange={(v) => setTimelogForm((prev) => ({ ...prev, description: v }))}
-                        />
-                      </div>
-                      <div className="mb-4">
-                        <button
-                          type="button"
-                          className="btn-primary px-3 py-2"
-                          onClick={() =>
-                            runAction("Submit timelog", async () => {
-                              const projectCode = timelogForm.project_code.trim();
-                              const logDate = timelogForm.log_date.trim();
-                              if (!projectCode || !logDate) {
-                                throw new Error("Project and Log Date are required.");
-                              }
-                              await apiClient.post(endpoints.timelog.root, {
-                                contentType: "application/json",
-                                body: JSON.stringify({
-                                  project_code: projectCode,
-                                  log_date: logDate,
-                                  hours: Number(timelogForm.hours),
-                                  description: timelogForm.description.trim() || null,
-                                }),
-                              });
-                              setTimelogForm({
-                                project_code: "",
-                                log_date: "",
-                                hours: "1",
-                                description: "",
-                              });
-                              try {
-                                await loadTimelogsForCurrentRole();
-                              } catch {
-                                /* submission succeeded; ignore refresh issue */
-                              }
-                            })
-                          }
-                          disabled={actionLoading}
-                        >
-                          Submit Timelog
-                        </button>
-                      </div>
-                    </>
-                  ) : (
-                    <p className="mb-4 text-sm text-wt-text-muted">
-                      HR can review timelog entries only.
-                    </p>
-                  )}
-                  {hasHrAccess ? (
-                    <DataTable
-                      columns={["project_code", "employee_name", "log_date", "hours", "description"]}
-                      rows={hrVisibleTimelogs}
-                      emptyLabel="No timelogs loaded."
-                    />
-                  ) : (
-                    <DataTable columns={["project_code", "log_date", "hours", "description"]} rows={timelogs} emptyLabel="No timelogs loaded." />
-                  )}
-                </div>
-              </section>
-            ) : null}
-
-            {activeTab === "team-timelog" && !requiresSelfOnboarding ? (
-              <section>
+                ) : null}
                 <div className="rounded-2xl border border-wt-border bg-wt-surface-1 p-5">
                   <div className="flex items-center justify-between mb-3">
                     <div>
                       <h3 className="font-semibold">Team Timelogs</h3>
                       <p className="text-xs text-wt-text-muted mt-1">
-                        View timelog entries submitted by employees under you.
+                        {hasManagerAccess
+                          ? "View timelog entries for your team, or use the employee filter to focus on one person."
+                          : "Review timelogs across the organization. Pick an employee email to load their entries, or leave ALL for the full feed."}
                       </p>
                     </div>
                     <button
@@ -4994,11 +4707,11 @@ function DashboardPageContent() {
                       Refresh
                     </button>
                   </div>
-                  <div className="mb-3 max-w-sm">
+                  <div className="mb-3 max-w-md">
                     <SelectField
-                      label="Employee Email"
+                      label="Employee email (filter)"
                       value={teamTimelogEmailFilter}
-                      options={["ALL", ...managerTeamEmailList]}
+                      options={["ALL", ...teamTimelogEmployeeOptions]}
                       onChange={setTeamTimelogEmailFilter}
                     />
                   </div>
@@ -5008,10 +4721,40 @@ function DashboardPageContent() {
                     emptyLabel="No team timelogs loaded."
                   />
                 </div>
+              </div>
+                ) : null}
               </section>
             ) : null}
 
             {activeTab === "leave" && !requiresSelfOnboarding ? (
+              <section className="space-y-4">
+                {hasManagerAccess || hasHrAccess ? (
+                  <div className="flex flex-wrap gap-2 border-b border-wt-border pb-3">
+                    <button
+                      type="button"
+                      onClick={() => setLeaveSubTab("my")}
+                      className={`rounded-lg px-3 py-2 text-sm font-medium transition ${
+                        leaveSubTab === "my"
+                          ? "bg-wt-surface-3 text-wt-text"
+                          : "text-wt-text-muted hover:bg-wt-surface-2"
+                      }`}
+                    >
+                      My leave requests
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setLeaveSubTab("team")}
+                      className={`rounded-lg px-3 py-2 text-sm font-medium transition ${
+                        leaveSubTab === "team"
+                          ? "bg-wt-surface-3 text-wt-text"
+                          : "text-wt-text-muted hover:bg-wt-surface-2"
+                      }`}
+                    >
+                      Team requests
+                    </button>
+                  </div>
+                ) : null}
+                {leaveSubTab === "my" ? (
               <section className="grid gap-4 xl:grid-cols-1">
                 <div className="space-y-4">
                   <div className="rounded-2xl border border-wt-border bg-wt-surface-1 p-5">
@@ -5215,9 +4958,7 @@ function DashboardPageContent() {
                   </div>
                 </div>
               </section>
-            ) : null}
-
-            {activeTab === "employee-request" && !requiresSelfOnboarding ? (
+                ) : hasManagerAccess || hasHrAccess ? (
               <section className="rounded-2xl border border-wt-border bg-wt-surface-1 p-5 space-y-4">
                 <div className="flex flex-wrap items-end gap-3">
                   <InputField
@@ -5334,6 +5075,8 @@ function DashboardPageContent() {
                   </p>
                 )}
               </section>
+                ) : null}
+              </section>
             ) : null}
 
             {activeTab === "offboarding" && !requiresSelfOnboarding && hasHrAccess ? (
@@ -5358,6 +5101,12 @@ function DashboardPageContent() {
                       ))}
                     </select>
                   </label>
+                  <InputField
+                    label="Resignation date"
+                    type="date"
+                    value={offboardingForm.resignation_date}
+                    onChange={(v) => setOffboardingForm((p) => ({ ...p, resignation_date: v }))}
+                  />
                   <InputField
                     label="Last Working Day"
                     type="date"
@@ -5394,6 +5143,9 @@ function DashboardPageContent() {
                     Is Regretted
                   </label>
                 </div>
+                {offboardingNoticeLabel ? (
+                  <p className="text-sm text-wt-text-muted mt-2">{offboardingNoticeLabel}</p>
+                ) : null}
                 <div className="mt-4">
                   <button
                     type="button"
@@ -5405,9 +5157,11 @@ function DashboardPageContent() {
                         if (!empIdValue) throw new Error("Please select emp_id.");
                         const lastWorkingDay = offboardingForm.last_working_day.trim();
                         if (!lastWorkingDay) throw new Error("Please select last working day.");
+                        const resignationDate = offboardingForm.resignation_date.trim();
                         const payload = {
                           last_working_day: lastWorkingDay,
                           separation_type: offboardingForm.separation_type,
+                          resignation_date: resignationDate || undefined,
                           reason: offboardingForm.reason.trim() || undefined,
                           critical_skill: offboardingForm.critical_skill.trim() || undefined,
                           is_regretted: offboardingForm.is_regretted,
@@ -5415,6 +5169,7 @@ function DashboardPageContent() {
                         await hrmsService.offboardEmployee(empIdValue, payload);
                         setOffboardingForm((prev) => ({
                           ...prev,
+                          resignation_date: "",
                           last_working_day: "",
                           reason: "",
                           critical_skill: "",
@@ -5677,9 +5432,9 @@ function DashboardPageContent() {
                         compact
                       />
                       <DataTable
-                        title="Bench Aging and Size"
+                        title="Bench aging and size (includes investment allocations)"
                         columns={["emp_id", "email", "name", "department", "bench_days"]}
-                        rows={benchAgingRows}
+                        rows={utilizationBenchRowsWithInvestment}
                         emptyLabel="No bench aging rows."
                         compact
                       />
@@ -5943,881 +5698,6 @@ function DashboardPageContent() {
               </section>
             ) : null}
 
-            {activeTab === "learning" && !requiresSelfOnboarding ? (
-              <section className="space-y-4">
-                <div className="flex items-center justify-end">
-                  <button
-                    type="button"
-                    className="btn-primary px-3 py-2"
-                    onClick={() =>
-                      runAction("Load learning hub", async () => {
-                        await loadLearningTrainingsSafe();
-                        const trainingId = selectedLearningTrainingId.trim();
-                        if (trainingId) {
-                          await loadLearningDetailSafe(trainingId);
-                          await loadLearningRosterLists(trainingId);
-                        }
-                      })
-                    }
-                    disabled={actionLoading}
-                  >
-                    Refresh
-                  </button>
-                </div>
-
-                <div className="rounded-2xl border border-wt-border bg-wt-surface-1 p-5 space-y-3">
-                  <div className="flex items-center justify-between gap-2">
-                    <h4 className="font-semibold">Training Records</h4>
-                    <span className="text-xs text-wt-text-muted">{learningTrainings.length} training(s)</span>
-                  </div>
-                  {learningTrainings.length ? (
-                    <div className="wt-scroll-both max-h-[min(48vh,360px)] rounded-xl border border-wt-border">
-                      <table className="min-w-full text-sm">
-                        <thead className="bg-wt-surface-2 text-wt-text-muted">
-                          <tr>
-                            <th className="text-left px-3 py-2 font-medium whitespace-nowrap">id</th>
-                            <th className="text-left px-3 py-2 font-medium whitespace-nowrap">name</th>
-                            <th className="text-left px-3 py-2 font-medium whitespace-nowrap">category</th>
-                            <th className="text-left px-3 py-2 font-medium whitespace-nowrap">type</th>
-                            <th className="text-left px-3 py-2 font-medium whitespace-nowrap">status</th>
-                            <th className="text-left px-3 py-2 font-medium whitespace-nowrap">duration days</th>
-                            <th className="text-left px-3 py-2 font-medium whitespace-nowrap">actions</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {learningTrainings.map((row, idx) => {
-                            const id = String(row.id ?? "").trim();
-                            return (
-                              <tr key={`${id || "training"}-${idx}`} className="border-t border-wt-border">
-                                <td className="px-3 py-2 whitespace-nowrap">{id || "—"}</td>
-                                <td className="px-3 py-2 whitespace-nowrap">{String(row.name ?? "—")}</td>
-                                <td className="px-3 py-2 whitespace-nowrap">{String(row.category ?? "—")}</td>
-                                <td className="px-3 py-2 whitespace-nowrap">{String(row.type ?? "—")}</td>
-                                <td className="px-3 py-2 whitespace-nowrap">{String(row.status ?? "—")}</td>
-                                <td className="px-3 py-2 whitespace-nowrap">{String(row.duration_days ?? "—")}</td>
-                                <td className="px-3 py-2 whitespace-nowrap">
-                                  <div className="inline-flex items-center gap-1">
-                                    <button
-                                      type="button"
-                                      className="rounded-lg p-2 text-wt-text-muted hover:bg-wt-surface-1 hover:text-wt-text"
-                                      aria-label={`Edit training ${id || idx}`}
-                                      title="Edit training"
-                                      onClick={() => {
-                                        setSelectedLearningTrainingId(id);
-                                        setLearningTrainingForm((prev) => ({
-                                          ...prev,
-                                          name: String(row.name ?? "").trim(),
-                                          category: String(row.category ?? "TECHNICAL").trim(),
-                                          type: String(row.type ?? "OPTIONAL").trim(),
-                                          description: String(row.description ?? "").trim(),
-                                          duration_days: String(row.duration_days ?? "1").trim(),
-                                          status: String(row.status ?? "DRAFT").trim(),
-                                        }));
-                                      }}
-                                      disabled={!id || actionLoading}
-                                    >
-                                      <IconPencil />
-                                    </button>
-                                  </div>
-                                </td>
-                              </tr>
-                            );
-                          })}
-                        </tbody>
-                      </table>
-                    </div>
-                  ) : (
-                    <p className="text-sm text-wt-text-muted">No trainings loaded.</p>
-                  )}
-                </div>
-
-                {hasHrAccess ? (
-                  <div className="grid xl:grid-cols-2 gap-4">
-                    <div className="rounded-2xl border border-wt-border bg-wt-surface-1 p-5 space-y-3">
-                      <h4 className="font-semibold">Create / Update Training</h4>
-                      <div className="flex justify-end">
-                        <button
-                          type="button"
-                          className="btn-primary h-10 w-10 text-lg leading-none"
-                          title="Create training"
-                          aria-label="Create training"
-                          disabled={actionLoading}
-                          onClick={() =>
-                            (() => {
-                              setSelectedLearningTrainingId("");
-                              setLearningCreateTrainerId("");
-                              setLearningTrainingForm({
-                                name: "",
-                                category: "TECHNICAL",
-                                type: "OPTIONAL",
-                                description: "",
-                                duration_days: "1",
-                                status: "DRAFT",
-                              });
-                            })()
-                          }
-                        >
-                          +
-                        </button>
-                      </div>
-                      <div className="grid sm:grid-cols-2 gap-3">
-                        <InputField
-                          label="Name"
-                          value={learningTrainingForm.name}
-                          onChange={(v) => setLearningTrainingForm((p) => ({ ...p, name: v }))}
-                        />
-                        <SelectField
-                          label="Category"
-                          value={learningTrainingForm.category}
-                          options={["PROFESSIONAL", "TECHNICAL", "SOFT_SKILLS"]}
-                          onChange={(v) => setLearningTrainingForm((p) => ({ ...p, category: v }))}
-                        />
-                        <SelectField
-                          label="Type"
-                          value={learningTrainingForm.type}
-                          options={["MANDATORY", "OPTIONAL", "HYBRID"]}
-                          onChange={(v) => setLearningTrainingForm((p) => ({ ...p, type: v }))}
-                        />
-                        <InputField
-                          label="Duration (days)"
-                          value={learningTrainingForm.duration_days}
-                          onChange={(v) => setLearningTrainingForm((p) => ({ ...p, duration_days: v }))}
-                        />
-                        <SelectField
-                          label="Status"
-                          value={learningTrainingForm.status}
-                          options={["DRAFT", "SCHEDULED", "IN_PROGRESS", "COMPLETED", "CANCELLED"]}
-                          onChange={(v) => setLearningTrainingForm((p) => ({ ...p, status: v }))}
-                        />
-                        <InputField
-                          label="Description"
-                          value={learningTrainingForm.description}
-                          onChange={(v) => setLearningTrainingForm((p) => ({ ...p, description: v }))}
-                        />
-                        {!selectedLearningTrainingId ? (
-                          <div className="sm:col-span-2">
-                            <label className="text-xs text-wt-text-muted flex flex-col gap-1">
-                              Trainer (assigned when you create this training)
-                              <select
-                                className="input-field px-3 py-2 text-sm"
-                                value={learningCreateTrainerId}
-                                onChange={(e) => setLearningCreateTrainerId(e.target.value)}
-                              >
-                                <option value="">Select trainer (optional)</option>
-                                {learningTrainerOptions.map((trainer) => (
-                                  <option key={`create-trainer-${trainer.id}`} value={trainer.id}>
-                                    {trainer.label}
-                                  </option>
-                                ))}
-                              </select>
-                              {!learningTrainerOptions.length ? (
-                                <span className="text-[11px] text-wt-text-muted mt-1">
-                                  Load employees with Refresh on this tab.
-                                </span>
-                              ) : null}
-                            </label>
-                          </div>
-                        ) : null}
-                      </div>
-                      <div className="flex flex-wrap gap-2">
-                        <button
-                          type="button"
-                          className="btn-primary px-3 py-2"
-                          disabled={actionLoading || !selectedLearningTrainingId}
-                          onClick={() =>
-                            runAction("Update training", async () => {
-                              await hrmsService.updateTraining(selectedLearningTrainingId, {
-                                name: learningTrainingForm.name.trim() || undefined,
-                                category: learningTrainingForm.category,
-                                type: learningTrainingForm.type,
-                                description: learningTrainingForm.description.trim() || null,
-                                duration_days: Number(learningTrainingForm.duration_days || "1"),
-                                status: learningTrainingForm.status,
-                              });
-                              await loadLearningTrainingsSafe();
-                              await loadLearningDetailSafe(selectedLearningTrainingId);
-                            })
-                          }
-                        >
-                          Update Selected
-                        </button>
-                        <button
-                          type="button"
-                          className="btn-primary px-3 py-2"
-                          disabled={actionLoading}
-                          onClick={() =>
-                            runAction("Create training", async () => {
-                              const normalizedName = learningTrainingForm.name.trim();
-                              if (!normalizedName) {
-                                throw new Error("Training name is required.");
-                              }
-                              const createRes = await hrmsService.createTraining({
-                                name: normalizedName,
-                                category: learningTrainingForm.category,
-                                type: learningTrainingForm.type,
-                                description: learningTrainingForm.description.trim() || null,
-                                duration_days: Number(learningTrainingForm.duration_days || "1"),
-                              });
-                              const created = ((createRes as { data?: unknown }).data ?? createRes) as
-                                | Record<string, unknown>
-                                | null;
-                              const createdTrainingId = String(created?.id ?? "").trim();
-                              if (createdTrainingId && learningCreateTrainerId.trim()) {
-                                const idNum = await resolveLearningTrainerUserId(learningCreateTrainerId);
-                                await hrmsService.assignTrainers(createdTrainingId, [idNum]);
-                              }
-                              await loadLearningTrainingsSafe();
-                              if (createdTrainingId) {
-                                await loadLearningDetailSafe(createdTrainingId);
-                              }
-                              setSelectedLearningTrainingId("");
-                              setLearningCreateTrainerId("");
-                              setLearningTrainingForm({
-                                name: "",
-                                category: "TECHNICAL",
-                                type: "OPTIONAL",
-                                description: "",
-                                duration_days: "1",
-                                status: "DRAFT",
-                              });
-                            })
-                          }
-                        >
-                          Create New
-                        </button>
-                      </div>
-                    </div>
-
-                    <div className="rounded-2xl border border-wt-border bg-wt-surface-1 p-5 space-y-3">
-                      <h4 className="font-semibold">Sessions & Trainers</h4>
-                      <label className="text-xs text-wt-text-muted flex flex-col gap-1">
-                        Training
-                        <select
-                          className="input-field px-3 py-2 text-sm"
-                          value={selectedLearningTrainingId}
-                          onChange={(e) => setSelectedLearningTrainingId(e.target.value)}
-                        >
-                          <option value="">Select training</option>
-                          {learningTrainings.map((row) => {
-                            const id = String(row.id ?? "").trim();
-                            const name = String((row.name ?? id) || "Training").trim();
-                            return (
-                              <option key={`session-training-${id || name}`} value={id}>
-                                {name}
-                              </option>
-                            );
-                          })}
-                        </select>
-                      </label>
-                      <label className="text-xs text-wt-text-muted flex flex-col gap-1">
-                        Trainer
-                        <select
-                          className="input-field px-3 py-2 text-sm"
-                          value={selectedLearningTrainerId}
-                          onChange={(e) => setSelectedLearningTrainerId(e.target.value)}
-                        >
-                          <option value="">Select trainer</option>
-                          {learningTrainerOptions.map((trainer) => (
-                            <option key={trainer.id} value={trainer.id}>
-                              {trainer.label}
-                            </option>
-                          ))}
-                        </select>
-                        {!learningTrainerOptions.length ? (
-                          <span className="text-[11px] text-wt-text-muted mt-1">
-                            No employees loaded for trainer selection. Click Refresh.
-                          </span>
-                        ) : null}
-                      </label>
-                      <div className="flex flex-wrap gap-2">
-                        <button
-                          type="button"
-                          className="btn-primary px-3 py-2"
-                          disabled={actionLoading || !selectedLearningTrainingId || !selectedLearningTrainerId}
-                          onClick={() =>
-                            runAction("Assign trainers", async () => {
-                              const idNum = await resolveLearningTrainerUserId(selectedLearningTrainerId);
-                              await hrmsService.assignTrainers(selectedLearningTrainingId, [idNum]);
-                              await loadLearningTrainingsSafe();
-                              await loadLearningRosterLists(selectedLearningTrainingId);
-                            })
-                          }
-                        >
-                          Assign Trainers
-                        </button>
-                        <button
-                          type="button"
-                          className="btn-primary px-3 py-2"
-                          disabled={actionLoading || !selectedLearningTrainingId || !selectedLearningTrainerId}
-                          onClick={() =>
-                            runAction("Remove trainer", async () => {
-                              const idNum = await resolveLearningTrainerUserId(selectedLearningTrainerId);
-                              await hrmsService.removeTrainer(
-                                selectedLearningTrainingId,
-                                String(idNum)
-                              );
-                              await loadLearningTrainingsSafe();
-                              await loadLearningRosterLists(selectedLearningTrainingId);
-                            })
-                          }
-                        >
-                          Remove Trainer
-                        </button>
-                      </div>
-                      <div className="grid sm:grid-cols-2 gap-3">
-                        <InputField
-                          label="Session Date"
-                          type="date"
-                          value={learningSessionForm.session_date}
-                          onChange={(v) => setLearningSessionForm((p) => ({ ...p, session_date: v }))}
-                        />
-                        <InputField
-                          label="Start Time"
-                          type="time"
-                          value={learningSessionForm.start_time}
-                          onChange={(v) => setLearningSessionForm((p) => ({ ...p, start_time: v }))}
-                        />
-                        <InputField
-                          label="End Time"
-                          type="time"
-                          value={learningSessionForm.end_time}
-                          onChange={(v) => setLearningSessionForm((p) => ({ ...p, end_time: v }))}
-                        />
-                        <SelectField
-                          label="Mode"
-                          value={learningSessionForm.mode}
-                          options={["ONLINE", "OFFLINE", "HYBRID"]}
-                          onChange={(v) => setLearningSessionForm((p) => ({ ...p, mode: v }))}
-                        />
-                        <InputField
-                          label="Venue"
-                          value={learningSessionForm.venue}
-                          onChange={(v) => setLearningSessionForm((p) => ({ ...p, venue: v }))}
-                        />
-                        <InputField
-                          label="Meeting Link"
-                          value={learningSessionForm.meeting_link}
-                          onChange={(v) => setLearningSessionForm((p) => ({ ...p, meeting_link: v }))}
-                        />
-                      </div>
-                      <button
-                        type="button"
-                        className="btn-primary px-3 py-2"
-                        disabled={actionLoading || !selectedLearningTrainingId}
-                        onClick={() =>
-                          runAction("Create session", async () => {
-                            await hrmsService.createTrainingSession(selectedLearningTrainingId, {
-                              ...learningSessionForm,
-                              venue: learningSessionForm.venue.trim() || null,
-                              meeting_link: learningSessionForm.meeting_link.trim() || null,
-                            });
-                            setLearningSessionForm({
-                              session_date: "",
-                              start_time: "",
-                              end_time: "",
-                              mode: "ONLINE",
-                              venue: "",
-                              meeting_link: "",
-                            });
-                            await loadLearningDetailSafe(selectedLearningTrainingId);
-                          })
-                        }
-                      >
-                        Add Session
-                      </button>
-                      <DataTable
-                        title="Sessions"
-                        columns={["id", "session_date", "start_time", "end_time", "mode", "venue", "meeting_link"]}
-                        rows={learningSessions}
-                        emptyLabel="No sessions loaded."
-                      />
-                    </div>
-
-                    <div className="rounded-2xl border border-wt-border bg-wt-surface-1 p-5 space-y-3 xl:col-span-2">
-                      <h4 className="font-semibold">Trainers & participants</h4>
-                      <p className="text-xs text-wt-text-muted">
-                        Pick a training to load trainers. Add employees as participants below; participant data still
-                        loads in the background for attendance and scores. Use Refresh on this tab if employee dropdowns
-                        are empty.
-                      </p>
-                      <div className="grid sm:grid-cols-2 gap-3">
-                        <label className="text-xs text-wt-text-muted flex flex-col gap-1">
-                          Training
-                          <select
-                            className="input-field px-3 py-2 text-sm"
-                            value={selectedLearningTrainingId}
-                            onChange={(e) => setSelectedLearningTrainingId(e.target.value)}
-                          >
-                            <option value="">Select training</option>
-                            {learningTrainings.map((row) => {
-                              const id = String(row.id ?? "").trim();
-                              const name = String((row.name ?? id) || "Training").trim();
-                              return (
-                                <option key={`roster-training-${id || name}`} value={id}>
-                                  {name}
-                                </option>
-                              );
-                            })}
-                          </select>
-                        </label>
-                        <label className="text-xs text-wt-text-muted flex flex-col gap-1">
-                          Employee (add as participant)
-                          <select
-                            className="input-field px-3 py-2 text-sm"
-                            value={selectedLearningParticipantId}
-                            onChange={(e) => setSelectedLearningParticipantId(e.target.value)}
-                          >
-                            <option value="">Select employee</option>
-                            {learningTrainerOptions.map((emp) => (
-                              <option key={`roster-participant-${emp.id}`} value={emp.id}>
-                                {emp.label}
-                              </option>
-                            ))}
-                          </select>
-                        </label>
-                      </div>
-                      <div className="flex flex-wrap gap-2">
-                        <button
-                          type="button"
-                          className="btn-primary px-3 py-2"
-                          disabled={actionLoading || !selectedLearningTrainingId || !selectedLearningParticipantId}
-                          onClick={() =>
-                            runAction("Add training participant", async () => {
-                              const idNum = await resolveLearningTrainerUserId(selectedLearningParticipantId);
-                              await hrmsService.addTrainingParticipants(selectedLearningTrainingId, {
-                                user_ids: [idNum],
-                                select_all: false,
-                              });
-                              await loadLearningTrainingsSafe();
-                              await loadLearningRosterLists(selectedLearningTrainingId);
-                            })
-                          }
-                        >
-                          Add participant
-                        </button>
-                        <button
-                          type="button"
-                          className="btn-primary px-3 py-2"
-                          disabled={actionLoading || !selectedLearningTrainingId.trim()}
-                          onClick={() =>
-                            runAction("Reload trainers and participants", async () => {
-                              await loadLearningRosterLists(selectedLearningTrainingId);
-                            })
-                          }
-                        >
-                          Reload lists
-                        </button>
-                        <button
-                          type="button"
-                          className="btn-primary px-3 py-2"
-                          disabled={actionLoading || !selectedLearningTrainingId.trim()}
-                          onClick={() =>
-                            runAction("List participants", async () => {
-                              await loadLearningParticipantsOnly(selectedLearningTrainingId);
-                            })
-                          }
-                        >
-                          List participants
-                        </button>
-                      </div>
-                      <label className="text-xs text-wt-text-muted flex flex-col gap-1">
-                        Participant (from API)
-                        <select
-                          className="input-field px-3 py-2 text-sm"
-                          value={selectedLearningApiParticipantId}
-                          onFocus={() => {
-                            if (selectedLearningTrainingId.trim()) {
-                              void loadLearningParticipantsOnly(selectedLearningTrainingId);
-                            }
-                          }}
-                          onChange={(e) => {
-                            const value = e.target.value;
-                            setSelectedLearningApiParticipantId(value);
-                            setLearningAttendanceForm((p) => ({ ...p, user_id: value }));
-                            setLearningScoreForm((p) => ({ ...p, user_id: value }));
-                          }}
-                        >
-                          <option value="">Select participant</option>
-                          {learningParticipantOptionsForAttendanceScores.map((emp) => (
-                            <option key={`api-participant-${emp.id}`} value={emp.id}>
-                              {emp.label}
-                            </option>
-                          ))}
-                        </select>
-                        {!learningParticipantOptionsForAttendanceScores.length ? (
-                          <span className="text-[11px] text-wt-text-muted mt-1">
-                            Click List participants to load from GET /trainings/{"{"}id{"}"}/participants.
-                          </span>
-                        ) : null}
-                      </label>
-                      <DataTable
-                        title="Participants (API)"
-                        columns={[
-                          "id",
-                          "training_id",
-                          "user_id",
-                          "name",
-                          "email",
-                          "participant_source",
-                          "enrollment_status",
-                        ]}
-                        rows={learningRosterParticipantRows}
-                        emptyLabel={
-                          selectedLearningTrainingId.trim()
-                            ? "No participants found for this training."
-                            : "Select a training, then click List participants."
-                        }
-                      />
-                      <div className="space-y-2 pt-2 border-t border-wt-border">
-                        <p className="text-sm font-medium">Trainers</p>
-                        <p className="text-[11px] text-wt-text-muted">
-                          Loaded from GET /trainings/{"{"}id{"}"}/trainers for the selected training.
-                        </p>
-                        <DataTable
-                          columns={["id", "user_id", "name", "email", "trainer_user_id"]}
-                          rows={learningRosterTrainerRows}
-                          emptyLabel={
-                            selectedLearningTrainingId.trim()
-                              ? "No trainers assigned for this training."
-                              : "Select a training to load trainers."
-                          }
-                        />
-                      </div>
-                    </div>
-
-                    <div className="rounded-2xl border border-wt-border bg-wt-surface-1 p-5 space-y-3">
-                      <h4 className="font-semibold">Materials, Assessments, Attendance & Scores</h4>
-                      <div className="grid sm:grid-cols-2 gap-3">
-                        <InputField
-                          label="Material Title"
-                          value={learningMaterialForm.title}
-                          onChange={(v) => setLearningMaterialForm((p) => ({ ...p, title: v }))}
-                        />
-                        <SelectField
-                          label="Material Visibility"
-                          value={learningMaterialForm.visibility}
-                          options={["EMPLOYEE", "HR_ONLY"]}
-                          onChange={(v) => setLearningMaterialForm((p) => ({ ...p, visibility: v }))}
-                        />
-                        <FileField label="Material PDF" accept=".pdf,application/pdf" onPick={setLearningMaterialFile} />
-                      </div>
-                      <button
-                        type="button"
-                        className="btn-primary px-3 py-2"
-                        disabled={actionLoading || !selectedLearningTrainingId || !learningMaterialFile}
-                        onClick={() =>
-                          runAction("Upload material", async () => {
-                            const materialFile = learningMaterialFile;
-                            if (!materialFile) return;
-                            await hrmsService.uploadTrainingMaterial(selectedLearningTrainingId, {
-                              title: learningMaterialForm.title.trim(),
-                              visibility: learningMaterialForm.visibility as "HR_ONLY" | "EMPLOYEE",
-                              materialFile,
-                            });
-                            await loadLearningDetailSafe(selectedLearningTrainingId);
-                          })
-                        }
-                      >
-                        Upload Material
-                      </button>
-                      <div className="grid sm:grid-cols-2 gap-3">
-                        <InputField
-                          label="Assessment Name"
-                          value={learningAssessmentForm.name}
-                          onChange={(v) => setLearningAssessmentForm((p) => ({ ...p, name: v }))}
-                        />
-                        <InputField
-                          label="Weight Percent"
-                          value={learningAssessmentForm.weight_percent}
-                          onChange={(v) => setLearningAssessmentForm((p) => ({ ...p, weight_percent: v }))}
-                        />
-                        <InputField
-                          label="Assessment Description"
-                          value={learningAssessmentForm.description}
-                          onChange={(v) => setLearningAssessmentForm((p) => ({ ...p, description: v }))}
-                        />
-                        <FileField label="Assessment PDF" accept=".pdf,application/pdf" onPick={setLearningAssessmentFile} />
-                      </div>
-                      <button
-                        type="button"
-                        className="btn-primary px-3 py-2"
-                        disabled={actionLoading || !selectedLearningTrainingId || !learningAssessmentFile}
-                        onClick={() =>
-                          runAction("Upload assessment", async () => {
-                            const assessmentFile = learningAssessmentFile;
-                            if (!assessmentFile) return;
-                            await hrmsService.uploadAssessment(selectedLearningTrainingId, {
-                              name: learningAssessmentForm.name.trim(),
-                              description: learningAssessmentForm.description.trim() || undefined,
-                              weight_percent: Number(learningAssessmentForm.weight_percent || "0"),
-                              assessmentFile,
-                            });
-                            await loadLearningDetailSafe(selectedLearningTrainingId);
-                          })
-                        }
-                      >
-                        Upload Assessment
-                      </button>
-                      <div className="space-y-3 border-t border-wt-border pt-3">
-                        <p className="text-xs text-wt-text-muted">
-                          Attendance is saved per <span className="font-medium text-wt-text">session</span>.{" "}
-                          <span className="font-medium text-wt-text">Employee</span> lists for attendance and scores
-                          come only from <span className="font-medium text-wt-text">training participants</span> (GET{" "}
-                          <code className="text-[11px]">/trainings/{"{id}"}/participants</code>) for the selected
-                          training — add people under Trainers &amp; participants, then Refresh if needed.
-                        </p>
-                        <label className="text-xs text-wt-text-muted flex flex-col gap-1">
-                          Session (for attendance)
-                          <select
-                            className="input-field px-3 py-2 text-sm"
-                            value={selectedLearningSessionId}
-                            onChange={(e) => setSelectedLearningSessionId(e.target.value)}
-                          >
-                            <option value="">Select session</option>
-                            {learningSessions.map((s, sidx) => {
-                              const sid = String(s.id ?? "").trim();
-                              const d = String(s.session_date ?? s.sessionDate ?? "").trim();
-                              const st = String(s.start_time ?? s.startTime ?? "").trim();
-                              const en = String(s.end_time ?? s.endTime ?? "").trim();
-                              const timePart =
-                                st && en ? `${st}–${en}` : st || en ? `${st}${en}` : "";
-                              const label =
-                                [d, timePart, sid ? `id ${sid}` : ""].filter(Boolean).join(" · ") ||
-                                `Session ${sidx + 1}`;
-                              return (
-                                <option key={`attendance-session-${sid || sidx}`} value={sid}>
-                                  {label}
-                                </option>
-                              );
-                            })}
-                          </select>
-                          {selectedLearningTrainingId.trim() && !learningSessions.length ? (
-                            <span className="text-[11px] text-wt-text-muted mt-1">
-                              No sessions for this training yet. Add one under{" "}
-                              <span className="font-medium">Sessions &amp; Trainers</span>, then pick it here.
-                            </span>
-                          ) : !selectedLearningTrainingId.trim() ? (
-                            <span className="text-[11px] text-wt-text-muted mt-1">
-                              Select a training (table or dropdowns above) to load its sessions.
-                            </span>
-                          ) : null}
-                        </label>
-                        <div className="grid sm:grid-cols-2 gap-3">
-                          <label className="text-xs text-wt-text-muted flex flex-col gap-1">
-                            Employee (attendance)
-                            <select
-                              className="input-field px-3 py-2 text-sm"
-                              value={learningAttendanceForm.user_id}
-                              onChange={(e) =>
-                                setLearningAttendanceForm((p) => ({ ...p, user_id: e.target.value }))
-                              }
-                              onFocus={() => {
-                                if (selectedLearningTrainingId.trim()) {
-                                  void loadLearningParticipantsOnly(selectedLearningTrainingId);
-                                }
-                              }}
-                            >
-                              <option value="">Select participant</option>
-                              {learningParticipantOptionsForAttendanceScores.map((emp) => (
-                                <option key={`attendance-emp-${emp.id}`} value={emp.id}>
-                                  {emp.label}
-                                </option>
-                              ))}
-                            </select>
-                            {selectedLearningTrainingId.trim() &&
-                            !learningParticipantOptionsForAttendanceScores.length ? (
-                              <span className="text-[11px] text-wt-text-muted mt-1">
-                                No participants for this training. Enroll them under Trainers &amp; participants
-                                (or self-enroll), then Refresh.
-                              </span>
-                            ) : null}
-                          </label>
-                          <SelectField
-                            label="Attendance Status"
-                            value={learningAttendanceForm.attendance_status}
-                            options={["PRESENT", "ABSENT"]}
-                            onChange={(v) => setLearningAttendanceForm((p) => ({ ...p, attendance_status: v }))}
-                          />
-                        </div>
-                      </div>
-                      <div className="flex flex-wrap gap-2">
-                        <button
-                          type="button"
-                          className="btn-primary px-3 py-2"
-                          disabled={
-                            actionLoading ||
-                            !selectedLearningTrainingId ||
-                            !selectedLearningSessionId ||
-                            !learningAttendanceForm.user_id.trim()
-                          }
-                          onClick={() =>
-                            runAction("Mark attendance", async () => {
-                              const userId = await resolveLearningTrainerUserId(
-                                learningAttendanceForm.user_id.trim()
-                              );
-                              await hrmsService.markAttendance(selectedLearningTrainingId, selectedLearningSessionId, {
-                                user_id: userId,
-                                attendance_status: learningAttendanceForm.attendance_status as "PRESENT" | "ABSENT",
-                              });
-                              await loadLearningDetailSafe(selectedLearningTrainingId, selectedLearningSessionId);
-                              await loadLearningRosterLists(selectedLearningTrainingId);
-                            })
-                          }
-                        >
-                          Mark Attendance
-                        </button>
-                        <button
-                          type="button"
-                          className="btn-primary px-3 py-2"
-                          disabled={actionLoading || !selectedLearningTrainingId || !selectedLearningSessionId}
-                          onClick={() =>
-                            runAction("Load attendance", async () => {
-                              const res = await hrmsService.getAttendance(
-                                selectedLearningTrainingId,
-                                selectedLearningSessionId
-                              );
-                              setLearningAttendanceRows(toPagedRows(res.data ?? res));
-                            })
-                          }
-                        >
-                          Load Attendance
-                        </button>
-                      </div>
-                      <div className="grid sm:grid-cols-2 gap-3">
-                        <label className="text-xs text-wt-text-muted flex flex-col gap-1">
-                          Employee (scores)
-                          <select
-                            className="input-field px-3 py-2 text-sm"
-                            value={learningScoreForm.user_id}
-                            onChange={(e) => setLearningScoreForm((p) => ({ ...p, user_id: e.target.value }))}
-                            onFocus={() => {
-                              if (selectedLearningTrainingId.trim()) {
-                                void loadLearningParticipantsOnly(selectedLearningTrainingId);
-                              }
-                            }}
-                          >
-                            <option value="">Select participant</option>
-                            {learningParticipantOptionsForAttendanceScores.map((emp) => (
-                              <option key={`scores-emp-${emp.id}`} value={emp.id}>
-                                {emp.label}
-                              </option>
-                            ))}
-                          </select>
-                          {selectedLearningTrainingId.trim() &&
-                          !learningParticipantOptionsForAttendanceScores.length ? (
-                            <span className="text-[11px] text-wt-text-muted mt-1">
-                              No participants for this training. Add them under Trainers &amp; participants, then
-                              Refresh.
-                            </span>
-                          ) : null}
-                        </label>
-                        <InputField
-                          label="Score (%)"
-                          value={learningScoreForm.score_percent}
-                          onChange={(v) => setLearningScoreForm((p) => ({ ...p, score_percent: v }))}
-                        />
-                      </div>
-                      <label className="text-xs text-wt-text-muted flex items-center gap-2">
-                        <input
-                          type="checkbox"
-                          checked={learningScoreForm.mark_completed}
-                          onChange={(e) => setLearningScoreForm((p) => ({ ...p, mark_completed: e.target.checked }))}
-                        />
-                        Mark completed
-                      </label>
-                      <button
-                        type="button"
-                        className="btn-primary px-3 py-2"
-                        disabled={
-                          actionLoading ||
-                          !selectedLearningTrainingId ||
-                          !learningScoreForm.user_id.trim()
-                        }
-                        onClick={() =>
-                          runAction("Submit scores", async () => {
-                            const userId = await resolveLearningTrainerUserId(learningScoreForm.user_id.trim());
-                            const assessId =
-                              learningAssessments.length > 0
-                                ? String(learningAssessments[0]?.id ?? "1").trim() || "1"
-                                : "1";
-                            const pct = Number(learningScoreForm.score_percent ?? "0");
-                            const scoresJson: Record<string, number> = {
-                              [assessId]: Number.isFinite(pct) ? pct : 0,
-                            };
-                            const res = await hrmsService.submitTrainingScores(selectedLearningTrainingId, {
-                              user_id: userId,
-                              scores_json: scoresJson,
-                              mark_completed: learningScoreForm.mark_completed,
-                            });
-                            const scoreRow = ((res as { data?: unknown }).data ?? res) as Record<string, unknown>;
-                            setLearningScores((prev) => [scoreRow, ...prev].slice(0, 20));
-                            await loadLearningDetailSafe(selectedLearningTrainingId);
-                            await loadLearningRosterLists(selectedLearningTrainingId);
-                          })
-                        }
-                      >
-                        Submit Scores
-                      </button>
-                    </div>
-                  </div>
-                ) : null}
-
-                <div className={`grid gap-4 ${hasHrAccess ? "" : "xl:grid-cols-2"}`}>
-                  {!hasHrAccess ? (
-                    <div className="rounded-2xl border border-wt-border bg-wt-surface-1 p-5 space-y-3">
-                      <h4 className="font-semibold">Open Trainings (Self-Enroll)</h4>
-                      <p className="text-xs text-wt-text-muted">
-                        Pick a training in the table above, then enroll yourself.
-                      </p>
-                      <DataTable
-                        columns={["id", "name", "category", "type", "status", "duration_days"]}
-                        rows={learningOpenTrainings}
-                        emptyLabel="No open trainings."
-                      />
-                      <button
-                        type="button"
-                        className="btn-primary px-3 py-2"
-                        disabled={actionLoading || !selectedLearningTrainingId}
-                        onClick={() =>
-                          runAction("Self-enroll training", async () => {
-                            await hrmsService.selfEnrollTraining(selectedLearningTrainingId);
-                            await loadLearningTrainingsSafe();
-                          })
-                        }
-                      >
-                        Enroll to Selected Training
-                      </button>
-                    </div>
-                  ) : null}
-                  <div className="rounded-2xl border border-wt-border bg-wt-surface-1 p-5 space-y-3">
-                    <DataTable
-                      title="Materials"
-                      columns={["id", "training_id", "title", "material_url", "visibility"]}
-                      rows={learningMaterials}
-                      emptyLabel="No materials loaded."
-                    />
-                    <DataTable
-                      title="Assessments"
-                      columns={["id", "training_id", "name", "description", "file_url", "weight_percent"]}
-                      rows={learningAssessments}
-                      emptyLabel="No assessments loaded."
-                    />
-                    <DataTable
-                      title="Attendance"
-                      columns={["id", "training_session_id", "training_id", "user_id", "attendance_status"]}
-                      rows={learningAttendanceRows}
-                      emptyLabel="No attendance rows loaded."
-                    />
-                    <DataTable
-                      title="Latest Scores"
-                      columns={["id", "training_id", "user_id", "scores_json", "final_score_percent", "is_completed"]}
-                      rows={learningScores}
-                      emptyLabel="No scores submitted in this session."
-                    />
-                  </div>
-                </div>
-              </section>
-            ) : null}
 
             {activeTab === "uploads" && !requiresSelfOnboarding ? (
               <section>
@@ -6981,7 +5861,6 @@ function DashboardPageContent() {
               </section>
             ) : null}
           </main>
-        </div>
       {toast ? (
         <div className="fixed right-5 bottom-5 z-50">
           <div
@@ -6997,7 +5876,7 @@ function DashboardPageContent() {
           </div>
         </div>
       ) : null}
-    </div>
+    </>
   );
 }
 
